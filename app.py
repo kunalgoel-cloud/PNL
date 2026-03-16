@@ -7,6 +7,14 @@ import json
 import os
 from io import StringIO
 import hashlib
+import re
+
+# PDF handling
+try:
+    from PyPDF2 import PdfReader
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
 
 # Page configuration
 st.set_page_config(
@@ -112,6 +120,56 @@ def get_row_hash(row_data):
     """Generate unique hash for a row to detect duplicates"""
     row_str = json.dumps(row_data, sort_keys=True, default=str)
     return hashlib.md5(row_str.encode()).hexdigest()
+
+def parse_pdf_to_text(pdf_file):
+    """Extract text from PDF file"""
+    if not PDF_SUPPORT:
+        return None
+    
+    try:
+        pdf_reader = PdfReader(pdf_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        st.error(f"Error reading PDF: {str(e)}")
+        return None
+
+def parse_logistics_pdf(pdf_text):
+    """Parse logistics rules from PDF text"""
+    rules = []
+    
+    # Try to extract zone-based pricing tables
+    lines = pdf_text.split('\n')
+    
+    # Look for rate card patterns
+    current_zone = None
+    current_weight = None
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Detect zone headers (e.g., "Local", "Within State", "Metro to Metro")
+        if any(zone in line for zone in ['Local', 'Within State', 'Metro to Metro', 'Rest of India', 'Special Zone']):
+            current_zone = line.split()[0] if line.split() else None
+        
+        # Detect weight slabs
+        weight_match = re.search(r'(\d+)\s*-?\s*(\d+)?\s*(gms|kg|g)', line, re.IGNORECASE)
+        if weight_match:
+            current_weight = line
+        
+        # Extract numeric rates
+        numbers = re.findall(r'\d+\.?\d*', line)
+        if numbers and current_zone:
+            rules.append({
+                'zone': current_zone,
+                'weight_slab': current_weight if current_weight else 'Standard',
+                'rates': numbers,
+                'raw_line': line
+            })
+    
+    return rules if rules else None
 
 # Initialize session state
 def init_session_state():
@@ -433,65 +491,207 @@ elif page == "Logistics Rules":
     
     st.markdown("""
     <div class="info-box">
-    Upload separate rate cards for B2B and B2C shipments. The system will use these rules to calculate shipping costs.
+    Upload separate rate cards for B2B and B2C shipments. Supports CSV, JSON, and PDF formats.
+    The system will use these rules to calculate shipping costs.
     </div>
     """, unsafe_allow_html=True)
     
     tab1, tab2 = st.tabs(["📦 B2B Shipping Rules", "🛒 B2C Shipping Rules"])
     
     with tab1:
-        uploaded_b2b = st.file_uploader("Upload B2B Rate Card (CSV/JSON)", type=['csv', 'json'], key="b2b")
+        st.markdown("### Upload B2B Rate Card")
+        uploaded_b2b = st.file_uploader("Upload B2B Rate Card (CSV/JSON/PDF)", 
+                                        type=['csv', 'json', 'pdf'], key="b2b")
         
         if uploaded_b2b and st.button("Import B2B Rules"):
             try:
-                if uploaded_b2b.name.endswith('.csv'):
+                if uploaded_b2b.name.endswith('.pdf'):
+                    if not PDF_SUPPORT:
+                        st.error("❌ PDF support not available. Please install PyPDF2: pip install PyPDF2")
+                    else:
+                        pdf_text = parse_pdf_to_text(uploaded_b2b)
+                        if pdf_text:
+                            # Store raw text for reference
+                            st.session_state.logistics_b2b = {
+                                'raw_text': pdf_text,
+                                'uploaded_at': datetime.now().isoformat(),
+                                'filename': uploaded_b2b.name,
+                                'type': 'pdf'
+                            }
+                            
+                            # Try to parse structured rules
+                            parsed_rules = parse_logistics_pdf(pdf_text)
+                            if parsed_rules:
+                                st.session_state.logistics_b2b['rules'] = parsed_rules
+                            
+                            save_all_data()
+                            st.success("✅ B2B PDF shipping rules imported!")
+                            
+                            # Show preview
+                            with st.expander("📄 View Extracted Text"):
+                                st.text_area("PDF Content", pdf_text[:2000], height=300)
+                        else:
+                            st.error("❌ Failed to extract text from PDF")
+                
+                elif uploaded_b2b.name.endswith('.csv'):
                     df = pd.read_csv(uploaded_b2b)
                     rules = df.to_dict('records')
-                else:
-                    rules = json.load(uploaded_b2b)
+                    st.session_state.logistics_b2b = {
+                        'rules': rules,
+                        'uploaded_at': datetime.now().isoformat(),
+                        'filename': uploaded_b2b.name,
+                        'type': 'csv'
+                    }
+                    save_all_data()
+                    st.success("✅ B2B CSV shipping rules imported!")
                 
-                st.session_state.logistics_b2b = {
-                    'rules': rules,
-                    'uploaded_at': datetime.now().isoformat(),
-                    'filename': uploaded_b2b.name
-                }
-                save_all_data()
-                st.success("✅ B2B shipping rules imported!")
+                else:  # JSON
+                    rules = json.load(uploaded_b2b)
+                    st.session_state.logistics_b2b = {
+                        'rules': rules,
+                        'uploaded_at': datetime.now().isoformat(),
+                        'filename': uploaded_b2b.name,
+                        'type': 'json'
+                    }
+                    save_all_data()
+                    st.success("✅ B2B JSON shipping rules imported!")
+                    
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
         
+        # Display current rules
         if st.session_state.logistics_b2b:
-            st.info(f"📁 {st.session_state.logistics_b2b.get('filename', 'Unknown')}")
-            if 'rules' in st.session_state.logistics_b2b:
+            st.markdown("---")
+            st.markdown("### Current B2B Rules")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.info(f"📁 **File:** {st.session_state.logistics_b2b.get('filename', 'Unknown')}")
+            with col2:
+                st.info(f"📅 **Uploaded:** {st.session_state.logistics_b2b.get('uploaded_at', 'Unknown')[:10]}")
+            with col3:
+                st.info(f"📋 **Type:** {st.session_state.logistics_b2b.get('type', 'Unknown').upper()}")
+            
+            if st.session_state.logistics_b2b.get('type') == 'pdf':
+                # Show PDF content
+                with st.expander("📄 View PDF Content"):
+                    st.text_area("Extracted Text", 
+                                st.session_state.logistics_b2b.get('raw_text', '')[:3000], 
+                                height=400, key="b2b_pdf_view")
+                
+                if 'rules' in st.session_state.logistics_b2b:
+                    st.markdown("#### Parsed Rules")
+                    df_rules = pd.DataFrame(st.session_state.logistics_b2b['rules'])
+                    st.dataframe(df_rules.head(20), use_container_width=True)
+            
+            elif 'rules' in st.session_state.logistics_b2b:
                 df_rules = pd.DataFrame(st.session_state.logistics_b2b['rules'])
                 st.dataframe(df_rules.head(20), use_container_width=True)
+                
+                # Download button for rules
+                csv = df_rules.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Rules as CSV",
+                    data=csv,
+                    file_name="b2b_logistics_rules.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.warning("⚠️ No B2B shipping rules loaded yet.")
     
     with tab2:
-        uploaded_b2c = st.file_uploader("Upload B2C Rate Card (CSV/JSON)", type=['csv', 'json'], key="b2c")
+        st.markdown("### Upload B2C Rate Card")
+        uploaded_b2c = st.file_uploader("Upload B2C Rate Card (CSV/JSON/PDF)", 
+                                        type=['csv', 'json', 'pdf'], key="b2c")
         
         if uploaded_b2c and st.button("Import B2C Rules"):
             try:
-                if uploaded_b2c.name.endswith('.csv'):
+                if uploaded_b2c.name.endswith('.pdf'):
+                    if not PDF_SUPPORT:
+                        st.error("❌ PDF support not available. Please install PyPDF2: pip install PyPDF2")
+                    else:
+                        pdf_text = parse_pdf_to_text(uploaded_b2c)
+                        if pdf_text:
+                            st.session_state.logistics_b2c = {
+                                'raw_text': pdf_text,
+                                'uploaded_at': datetime.now().isoformat(),
+                                'filename': uploaded_b2c.name,
+                                'type': 'pdf'
+                            }
+                            
+                            parsed_rules = parse_logistics_pdf(pdf_text)
+                            if parsed_rules:
+                                st.session_state.logistics_b2c['rules'] = parsed_rules
+                            
+                            save_all_data()
+                            st.success("✅ B2C PDF shipping rules imported!")
+                            
+                            with st.expander("📄 View Extracted Text"):
+                                st.text_area("PDF Content", pdf_text[:2000], height=300)
+                        else:
+                            st.error("❌ Failed to extract text from PDF")
+                
+                elif uploaded_b2c.name.endswith('.csv'):
                     df = pd.read_csv(uploaded_b2c)
                     rules = df.to_dict('records')
-                else:
-                    rules = json.load(uploaded_b2c)
+                    st.session_state.logistics_b2c = {
+                        'rules': rules,
+                        'uploaded_at': datetime.now().isoformat(),
+                        'filename': uploaded_b2c.name,
+                        'type': 'csv'
+                    }
+                    save_all_data()
+                    st.success("✅ B2C CSV shipping rules imported!")
                 
-                st.session_state.logistics_b2c = {
-                    'rules': rules,
-                    'uploaded_at': datetime.now().isoformat(),
-                    'filename': uploaded_b2c.name
-                }
-                save_all_data()
-                st.success("✅ B2C shipping rules imported!")
+                else:  # JSON
+                    rules = json.load(uploaded_b2c)
+                    st.session_state.logistics_b2c = {
+                        'rules': rules,
+                        'uploaded_at': datetime.now().isoformat(),
+                        'filename': uploaded_b2c.name,
+                        'type': 'json'
+                    }
+                    save_all_data()
+                    st.success("✅ B2C JSON shipping rules imported!")
+                    
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
         
+        # Display current rules
         if st.session_state.logistics_b2c:
-            st.info(f"📁 {st.session_state.logistics_b2c.get('filename', 'Unknown')}")
-            if 'rules' in st.session_state.logistics_b2c:
+            st.markdown("---")
+            st.markdown("### Current B2C Rules")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.info(f"📁 **File:** {st.session_state.logistics_b2c.get('filename', 'Unknown')}")
+            with col2:
+                st.info(f"📅 **Uploaded:** {st.session_state.logistics_b2c.get('uploaded_at', 'Unknown')[:10]}")
+            with col3:
+                st.info(f"📋 **Type:** {st.session_state.logistics_b2c.get('type', 'Unknown').upper()}")
+            
+            if st.session_state.logistics_b2c.get('type') == 'pdf':
+                with st.expander("📄 View PDF Content"):
+                    st.text_area("Extracted Text", 
+                                st.session_state.logistics_b2c.get('raw_text', '')[:3000], 
+                                height=400, key="b2c_pdf_view")
+                
+                if 'rules' in st.session_state.logistics_b2c:
+                    st.markdown("#### Parsed Rules")
+                    df_rules = pd.DataFrame(st.session_state.logistics_b2c['rules'])
+                    st.dataframe(df_rules.head(20), use_container_width=True)
+            
+            elif 'rules' in st.session_state.logistics_b2c:
                 df_rules = pd.DataFrame(st.session_state.logistics_b2c['rules'])
                 st.dataframe(df_rules.head(20), use_container_width=True)
+                
+                csv = df_rules.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Rules as CSV",
+                    data=csv,
+                    file_name="b2c_logistics_rules.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.warning("⚠️ No B2C shipping rules loaded yet.")
 
 # ============================================================================
 # PAGE: GRN MANAGEMENT
