@@ -24,7 +24,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Outfit:wght@300;400;600;700;800&display=swap');
@@ -107,25 +107,32 @@ INVOICE_HASHES_FILE = os.path.join(DATA_DIR, "invoice_hashes.json")
 def load_json(filepath, default=None):
     """Load JSON data from file"""
     if os.path.exists(filepath):
-        with open(filepath, 'r') as f:
-            return json.load(f)
+        try:
+            with open(filepath, 'r') as f:
+                return json.load(f)
+        except:
+            return default if default is not None else []
     return default if default is not None else []
 
 def save_json(filepath, data):
     """Save JSON data to file"""
-    with open(filepath, 'w') as f:
-        json.dump(data, f, indent=2, default=str)
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+        return True
+    except Exception as e:
+        st.error(f"Error saving data: {str(e)}")
+        return False
 
 def get_row_hash(row_data):
-    """Generate unique hash for a row to detect duplicates"""
+    """Generate unique hash for a row"""
     row_str = json.dumps(row_data, sort_keys=True, default=str)
     return hashlib.md5(row_str.encode()).hexdigest()
 
 def parse_pdf_to_text(pdf_file):
-    """Extract text from PDF file"""
+    """Extract text from PDF"""
     if not PDF_SUPPORT:
         return None
-    
     try:
         pdf_reader = PdfReader(pdf_file)
         text = ""
@@ -136,43 +143,110 @@ def parse_pdf_to_text(pdf_file):
         st.error(f"Error reading PDF: {str(e)}")
         return None
 
-def parse_logistics_pdf(pdf_text):
-    """Parse logistics rules from PDF text"""
-    rules = []
+# Rate calculation functions (from uploaded code)
+def determine_zone(origin_city, dest_city, dest_state, origin_state="MAHARASHTRA"):
+    """Determine shipping zone"""
+    origin_city = str(origin_city).strip().title() if pd.notna(origin_city) else ""
+    dest_city = str(dest_city).strip().title() if pd.notna(dest_city) else ""
+    dest_state = str(dest_state).strip().upper() if pd.notna(dest_state) else ""
+    origin_state = str(origin_state).strip().upper()
     
-    # Try to extract zone-based pricing tables
-    lines = pdf_text.split('\n')
+    state_mapping = {
+        'MH': 'MAHARASHTRA', 'MAHARASHTRA': 'MAHARASHTRA',
+        'DL': 'DELHI', 'DELHI': 'DELHI',
+        'KA': 'KARNATAKA', 'KARNATAKA': 'KARNATAKA',
+        'TN': 'TAMIL NADU', 'TAMILNADU': 'TAMIL NADU',
+        'WB': 'WEST BENGAL',
+        'KL': 'KERALA', 'KERALA': 'KERALA',
+        'HP': 'HIMACHAL PRADESH',
+        'J&K': 'JAMMU AND KASHMIR',
+    }
     
-    # Look for rate card patterns
-    current_zone = None
-    current_weight = None
+    for code, full_name in state_mapping.items():
+        if code in origin_state:
+            origin_state = full_name
+            break
+    for code, full_name in state_mapping.items():
+        if code in dest_state:
+            dest_state = full_name
+            break
     
-    for line in lines:
-        line = line.strip()
-        
-        # Detect zone headers (e.g., "Local", "Within State", "Metro to Metro")
-        if any(zone in line for zone in ['Local', 'Within State', 'Metro to Metro', 'Rest of India', 'Special Zone']):
-            current_zone = line.split()[0] if line.split() else None
-        
-        # Detect weight slabs
-        weight_match = re.search(r'(\d+)\s*-?\s*(\d+)?\s*(gms|kg|g)', line, re.IGNORECASE)
-        if weight_match:
-            current_weight = line
-        
-        # Extract numeric rates
-        numbers = re.findall(r'\d+\.?\d*', line)
-        if numbers and current_zone:
-            rules.append({
-                'zone': current_zone,
-                'weight_slab': current_weight if current_weight else 'Standard',
-                'rates': numbers,
-                'raw_line': line
-            })
+    # Special zones
+    special_zones = ['JAMMU AND KASHMIR', 'HIMACHAL PRADESH', 'KERALA',
+                     'ARUNACHAL PRADESH', 'ASSAM', 'MANIPUR', 'MEGHALAYA',
+                     'MIZORAM', 'NAGALAND', 'TRIPURA', 'SIKKIM']
     
-    return rules if rules else None
+    for sz in special_zones:
+        if sz in dest_state:
+            return 'Special Zone'
+    
+    # Local city groups
+    local_groups = {
+        'MUMBAI': ['MUMBAI', 'NAVI MUMBAI', 'THANE'],
+        'DELHI': ['DELHI', 'NEW DELHI', 'GURGAON', 'NOIDA'],
+        'BANGALORE': ['BANGALORE', 'BENGALURU'],
+        'CHENNAI': ['CHENNAI'],
+        'KOLKATA': ['KOLKATA']
+    }
+    
+    for metro, cities in local_groups.items():
+        origin_in = any(c in origin_city.upper() for c in cities)
+        dest_in = any(c in dest_city.upper() for c in cities)
+        if origin_in and dest_in:
+            return 'Local'
+    
+    # Metro to Metro
+    metros = ['MUMBAI', 'DELHI', 'BANGALORE', 'CHENNAI', 'KOLKATA']
+    origin_metro = any(m in origin_city.upper() for m in metros)
+    dest_metro = any(m in dest_city.upper() for m in metros)
+    
+    if origin_metro and dest_metro:
+        return 'Metro to Metro'
+    
+    # Within state
+    if origin_state == dest_state:
+        return 'Within State'
+    
+    return 'Rest of India'
 
-# Initialize session state
+def calculate_freight_cost(weight_kg, zone, courier_name, rate_card):
+    """Calculate shipping cost based on weight and zone"""
+    if courier_name not in rate_card:
+        return 0
+    
+    if zone not in rate_card[courier_name]:
+        return 0
+    
+    rates = rate_card[courier_name][zone]
+    weight_grams = weight_kg * 1000
+    
+    # Air courier (simpler)
+    if 'Air' in courier_name:
+        if weight_grams <= 500:
+            return rates.get('0-500', 0)
+        else:
+            additional_slabs = int((weight_grams - 500) / 500) + (1 if (weight_grams - 500) % 500 > 0 else 0)
+            return rates.get('0-500', 0) + (additional_slabs * rates.get('add_500', 0))
+    
+    # Surface courier
+    if weight_kg <= 0.5:
+        return rates.get('0-500', 0)
+    elif weight_kg <= 2.0:
+        additional_slabs = int((weight_grams - 500) / 500) + (1 if (weight_grams - 500) % 500 > 0 else 0)
+        return rates.get('0-500', 0) + (additional_slabs * rates.get('add_500', 0))
+    elif weight_kg <= 5.0:
+        additional_kg = int(weight_kg - 2.0) + (1 if (weight_kg - 2.0) % 1 > 0 else 0)
+        return rates.get('2kg', 0) + (additional_kg * rates.get('add_1kg_2-5', 0))
+    elif weight_kg <= 10.0:
+        additional_kg = int(weight_kg - 5.0) + (1 if (weight_kg - 5.0) % 1 > 0 else 0)
+        return rates.get('5kg', 0) + (additional_kg * rates.get('add_1kg_5-10', 0))
+    else:
+        additional_kg = int(weight_kg - 10.0) + (1 if (weight_kg - 10.0) % 1 > 0 else 0)
+        return rates.get('10kg', 0) + (additional_kg * rates.get('add_1kg_10+', 0))
+
+# Initialize session state with persistence
 def init_session_state():
+    # Load all data from files
     if 'item_master' not in st.session_state:
         st.session_state.item_master = load_json(ITEM_MASTER_FILE, {})
     
@@ -201,14 +275,13 @@ def init_session_state():
         st.session_state.transaction_mapping = load_json(TRANSACTION_MAPPING_FILE, {})
     
     if 'invoice_hashes' not in st.session_state:
-        st.session_state.invoice_hashes = load_json(INVOICE_HASHES_FILE, [])
-        if isinstance(st.session_state.invoice_hashes, list):
-            st.session_state.invoice_hashes = set(st.session_state.invoice_hashes)
+        hashes = load_json(INVOICE_HASHES_FILE, [])
+        st.session_state.invoice_hashes = set(hashes) if isinstance(hashes, list) else set()
 
 init_session_state()
 
 def save_all_data():
-    """Save all data to JSON files"""
+    """Save all session data to files"""
     save_json(ITEM_MASTER_FILE, st.session_state.item_master)
     save_json(INVOICES_FILE, st.session_state.invoices)
     save_json(CUSTOMERS_FILE, st.session_state.customers)
@@ -229,7 +302,7 @@ page = st.sidebar.radio(
 )
 
 # ============================================================================
-# PAGE: ITEM MASTER
+# PAGE: ITEM MASTER (FIXED - Now fully editable)
 # ============================================================================
 if page == "Item Master":
     st.title("📦 Item Master Management")
@@ -255,41 +328,53 @@ if page == "Item Master":
                 'cogs': new_cogs
             }
             save_all_data()
-            st.success(f"✅ Product '{new_name}' added successfully!")
+            st.success(f"✅ Product '{new_name}' added!")
             st.rerun()
         else:
-            st.error("⚠️ SKU and Product Name are required!")
+            st.error("⚠️ SKU and Product Name required!")
     
-    st.markdown("### Current Products")
+    st.markdown("---")
+    st.markdown("### Current Products (Fully Editable)")
+    
     if st.session_state.item_master:
-        df = pd.DataFrame(list(st.session_state.item_master.values()))
+        # Convert to DataFrame for editing
+        items_list = list(st.session_state.item_master.values())
+        df = pd.DataFrame(items_list)
         
+        # Editable data editor
         edited_df = st.data_editor(
             df,
             hide_index=True,
             use_container_width=True,
+            num_rows="dynamic",  # Allow adding/deleting rows
             column_config={
-                "sku": st.column_config.TextColumn("SKU", disabled=True),
-                "name": st.column_config.TextColumn("Product Name"),
+                "sku": st.column_config.TextColumn("SKU", required=True),
+                "name": st.column_config.TextColumn("Product Name", required=True),
                 "category": st.column_config.TextColumn("Category"),
-                "cogs": st.column_config.NumberColumn("COGS (₹)", format="₹%.2f")
-            }
+                "cogs": st.column_config.NumberColumn("COGS (₹)", format="₹%.2f", min_value=0.0)
+            },
+            key="item_master_editor"
         )
         
-        if st.button("💾 Save Changes"):
-            st.session_state.item_master = {row['sku']: row for _, row in edited_df.iterrows()}
-            save_all_data()
-            st.success("✅ Changes saved successfully!")
-        
-        st.markdown("### Delete Product")
-        sku_to_delete = st.selectbox("Select SKU to delete", options=list(st.session_state.item_master.keys()))
-        if st.button("🗑️ Delete Selected Product"):
-            del st.session_state.item_master[sku_to_delete]
-            save_all_data()
-            st.success(f"✅ Product with SKU '{sku_to_delete}' deleted!")
-            st.rerun()
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            if st.button("💾 Save All Changes", type="primary"):
+                # Update item master with edited values
+                new_master = {}
+                for _, row in edited_df.iterrows():
+                    if row['sku']:  # Only save if SKU exists
+                        new_master[row['sku']] = {
+                            'sku': row['sku'],
+                            'name': row['name'],
+                            'category': row['category'],
+                            'cogs': float(row['cogs'])
+                        }
+                st.session_state.item_master = new_master
+                save_all_data()
+                st.success("✅ All changes saved!")
+                st.rerun()
     else:
-        st.info("ℹ️ No products added yet. Add your first product above!")
+        st.info("ℹ️ No products yet. Add your first product above!")
 
 # ============================================================================
 # PAGE: UPLOAD INVOICES
@@ -301,26 +386,23 @@ elif page == "Upload Invoices":
     <div class="info-box">
     <strong>ℹ️ Smart Upload Features:</strong>
     <ul>
-        <li>Automatically extracts item names and customer names from invoice data</li>
-        <li>Detects and skips duplicate invoices (even if uploaded multiple times)</li>
+        <li>Automatically extracts item names and customer names</li>
+        <li>Detects and skips duplicates</li>
         <li>Auto-classifies customers as B2B or B2C</li>
-        <li>Updates item master with new products found in invoices</li>
+        <li>Updates item master with new products</li>
     </ul>
     </div>
     """, unsafe_allow_html=True)
-    
-    st.markdown("---")
     
     uploaded_file = st.file_uploader("Upload Invoice CSV", type=['csv'])
     
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
-            
-            st.markdown("### Preview of Uploaded Data")
+            st.markdown("### Preview")
             st.dataframe(df.head(10), use_container_width=True)
             
-            if st.button("🚀 Process and Import Invoices"):
+            if st.button("🚀 Process and Import"):
                 new_count = 0
                 duplicate_count = 0
                 new_customers = set()
@@ -350,14 +432,16 @@ elif page == "Upload Invoices":
                         'status': str(row.get('Invoice Status', 'Draft')),
                         'grn_status': 'Pending',
                         'grn_date': None,
-                        'hash': row_hash
+                        'hash': row_hash,
+                        'dest_city': str(row.get('Place of Supply(With State Code)', '').split('-')[-1] if '-' in str(row.get('Place of Supply(With State Code)', '')) else ''),
+                        'dest_state': str(row.get('Place of Supply(With State Code)', '').split('-')[-1] if '-' in str(row.get('Place of Supply(With State Code)', '')) else '')
                     }
                     
                     customer_name = invoice_data['customer_name']
                     if 'Amazon' in customer_name.upper():
                         channel = 'Amazon'
                         customer_type = 'B2C'
-                    elif any(keyword in customer_name.upper() for keyword in ['PRIVATE LIMITED', 'PVT LTD', 'LIMITED', 'LLP']):
+                    elif any(k in customer_name.upper() for k in ['PRIVATE LIMITED', 'PVT LTD', 'LIMITED', 'LLP']):
                         channel = 'B2B'
                         customer_type = 'B2B'
                     else:
@@ -374,7 +458,9 @@ elif page == "Upload Invoices":
                         st.session_state.customers[customer_name] = {
                             'name': customer_name,
                             'type': customer_type,
-                            'classification': 'auto'
+                            'classification': 'auto',
+                            'channel': channel,
+                            'credit_days': 30  # Default credit days
                         }
                         new_customers.add(customer_name)
                     
@@ -391,7 +477,6 @@ elif page == "Upload Invoices":
                 
                 save_all_data()
                 
-                st.markdown("### Import Summary")
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("✅ New Invoices", new_count)
@@ -403,76 +488,92 @@ elif page == "Upload Invoices":
                 if new_customers:
                     st.markdown(f"""
                     <div class="success-box">
-                    <strong>🆕 New Customers Added ({len(new_customers)}):</strong><br>
-                    {', '.join(list(new_customers)[:5])}{'...' if len(new_customers) > 5 else ''}
+                    <strong>🆕 New Customers Added ({len(new_customers)})</strong>
                     </div>
                     """, unsafe_allow_html=True)
                 
                 if new_items:
                     st.markdown(f"""
                     <div class="warning-box">
-                    <strong>⚠️ New Items Added ({len(new_items)}):</strong><br>
-                    Please set COGS for these items in Item Master
+                    <strong>⚠️ New Items Added ({len(new_items)}) - Please set COGS in Item Master</strong>
                     </div>
                     """, unsafe_allow_html=True)
                 
-                st.success(f"✅ Import complete! {new_count} new invoices added, {duplicate_count} duplicates skipped.")
+                st.success(f"✅ Import complete!")
                 
         except Exception as e:
-            st.error(f"❌ Error processing file: {str(e)}")
+            st.error(f"❌ Error: {str(e)}")
     
     st.markdown("---")
     st.markdown("### Current Invoices")
     if st.session_state.invoices:
-        df_invoices = pd.DataFrame(st.session_state.invoices)
-        st.dataframe(
-            df_invoices[['invoice_number', 'date', 'customer_name', 'item_name', 'quantity', 'item_total', 'channel', 'grn_status']].head(50),
-            use_container_width=True
-        )
-        st.markdown(f"**Total Invoice Line Items:** {len(st.session_state.invoices)}")
-    else:
-        st.info("ℹ️ No invoices uploaded yet.")
+        df_inv = pd.DataFrame(st.session_state.invoices)
+        st.dataframe(df_inv[['invoice_number', 'date', 'customer_name', 'item_name', 'quantity', 'item_total', 'channel']].head(50))
+        st.markdown(f"**Total: {len(st.session_state.invoices)} invoice line items**")
 
 # ============================================================================
-# PAGE: CUSTOMERS
+# PAGE: CUSTOMERS (FIXED - Now fully editable with channel linking)
 # ============================================================================
 elif page == "Customers":
     st.title("👥 Customer Management")
     
     st.markdown("""
     <div class="info-box">
-    Classify customers as B2B or B2C to apply appropriate shipping and logistics costs in P&L calculations.
+    Manage customer classifications, credit terms, and channel linking
     </div>
     """, unsafe_allow_html=True)
     
     if st.session_state.customers:
-        df = pd.DataFrame(list(st.session_state.customers.values()))
+        # Convert to DataFrame
+        customers_list = []
+        for name, data in st.session_state.customers.items():
+            customers_list.append({
+                'name': name,
+                'type': data.get('type', 'B2C'),
+                'channel': data.get('channel', ''),
+                'credit_days': data.get('credit_days', 30),
+                'classification': data.get('classification', 'auto')
+            })
         
+        df = pd.DataFrame(customers_list)
+        
+        st.markdown("### Customer List (Fully Editable)")
+        
+        # Editable table
         edited_df = st.data_editor(
             df,
             hide_index=True,
             use_container_width=True,
             column_config={
                 "name": st.column_config.TextColumn("Customer Name", disabled=True),
-                "type": st.column_config.SelectboxColumn("Type", options=["B2B", "B2C"]),
-                "classification": st.column_config.TextColumn("Classification Method", disabled=True)
-            }
+                "type": st.column_config.SelectboxColumn("Type", options=["B2B", "B2C"], required=True),
+                "channel": st.column_config.TextColumn("Channel"),
+                "credit_days": st.column_config.NumberColumn("Credit Days", min_value=0, max_value=365, step=1),
+                "classification": st.column_config.TextColumn("Classification", disabled=True)
+            },
+            key="customers_editor"
         )
         
-        if st.button("💾 Save Customer Classifications"):
+        if st.button("💾 Save Customer Changes", type="primary"):
+            # Update customers with edited values
+            new_customers = {}
             for _, row in edited_df.iterrows():
-                st.session_state.customers[row['name']] = {
+                new_customers[row['name']] = {
                     'name': row['name'],
                     'type': row['type'],
+                    'channel': row['channel'],
+                    'credit_days': int(row['credit_days']),
                     'classification': 'manual'
                 }
+            st.session_state.customers = new_customers
             save_all_data()
-            st.success("✅ Customer classifications updated!")
+            st.success("✅ Customer data updated!")
+            st.rerun()
         
         st.markdown("---")
         col1, col2, col3 = st.columns(3)
-        b2b_count = sum(1 for c in st.session_state.customers.values() if c['type'] == 'B2B')
-        b2c_count = sum(1 for c in st.session_state.customers.values() if c['type'] == 'B2C')
+        b2b_count = sum(1 for c in st.session_state.customers.values() if c.get('type') == 'B2B')
+        b2c_count = sum(1 for c in st.session_state.customers.values() if c.get('type') == 'B2C')
         
         with col1:
             st.metric("Total Customers", len(st.session_state.customers))
@@ -481,71 +582,55 @@ elif page == "Customers":
         with col3:
             st.metric("B2C Customers", b2c_count)
     else:
-        st.info("ℹ️ No customers yet. Upload invoices to automatically populate customers.")
+        st.info("ℹ️ No customers yet. Upload invoices to populate.")
 
 # ============================================================================
-# PAGE: LOGISTICS RULES
+# PAGE: LOGISTICS RULES (With PDF support)
 # ============================================================================
 elif page == "Logistics Rules":
     st.title("🚚 Logistics & Shipping Rules")
     
     st.markdown("""
     <div class="info-box">
-    Upload separate rate cards for B2B and B2C shipments. Supports CSV, JSON, and PDF formats.
-    The system will use these rules to calculate shipping costs.
+    Upload rate cards in CSV, JSON, or PDF format. The system will use zone-based pricing for shipping calculations.
     </div>
     """, unsafe_allow_html=True)
     
-    tab1, tab2 = st.tabs(["📦 B2B Shipping Rules", "🛒 B2C Shipping Rules"])
+    tab1, tab2 = st.tabs(["📦 B2B Shipping", "🛒 B2C Shipping"])
     
     with tab1:
         st.markdown("### Upload B2B Rate Card")
-        uploaded_b2b = st.file_uploader("Upload B2B Rate Card (CSV/JSON/PDF)", 
-                                        type=['csv', 'json', 'pdf'], key="b2b")
+        uploaded_b2b = st.file_uploader("Upload (CSV/JSON/PDF)", type=['csv', 'json', 'pdf'], key="b2b")
         
         if uploaded_b2b and st.button("Import B2B Rules"):
             try:
                 if uploaded_b2b.name.endswith('.pdf'):
-                    if not PDF_SUPPORT:
-                        st.error("❌ PDF support not available. Please install PyPDF2: pip install PyPDF2")
-                    else:
+                    if PDF_SUPPORT:
                         pdf_text = parse_pdf_to_text(uploaded_b2b)
                         if pdf_text:
-                            # Store raw text for reference
                             st.session_state.logistics_b2b = {
                                 'raw_text': pdf_text,
                                 'uploaded_at': datetime.now().isoformat(),
                                 'filename': uploaded_b2b.name,
                                 'type': 'pdf'
                             }
-                            
-                            # Try to parse structured rules
-                            parsed_rules = parse_logistics_pdf(pdf_text)
-                            if parsed_rules:
-                                st.session_state.logistics_b2b['rules'] = parsed_rules
-                            
                             save_all_data()
-                            st.success("✅ B2B PDF shipping rules imported!")
-                            
-                            # Show preview
-                            with st.expander("📄 View Extracted Text"):
-                                st.text_area("PDF Content", pdf_text[:2000], height=300)
-                        else:
-                            st.error("❌ Failed to extract text from PDF")
+                            st.success("✅ B2B PDF imported!")
+                    else:
+                        st.error("❌ PDF support not available")
                 
                 elif uploaded_b2b.name.endswith('.csv'):
                     df = pd.read_csv(uploaded_b2b)
-                    rules = df.to_dict('records')
                     st.session_state.logistics_b2b = {
-                        'rules': rules,
+                        'rules': df.to_dict('records'),
                         'uploaded_at': datetime.now().isoformat(),
                         'filename': uploaded_b2b.name,
                         'type': 'csv'
                     }
                     save_all_data()
-                    st.success("✅ B2B CSV shipping rules imported!")
+                    st.success("✅ B2B CSV imported!")
                 
-                else:  # JSON
+                else:
                     rules = json.load(uploaded_b2b)
                     st.session_state.logistics_b2b = {
                         'rules': rules,
@@ -554,61 +639,29 @@ elif page == "Logistics Rules":
                         'type': 'json'
                     }
                     save_all_data()
-                    st.success("✅ B2B JSON shipping rules imported!")
-                    
+                    st.success("✅ B2B JSON imported!")
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
         
-        # Display current rules
         if st.session_state.logistics_b2b:
             st.markdown("---")
-            st.markdown("### Current B2B Rules")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.info(f"📁 **File:** {st.session_state.logistics_b2b.get('filename', 'Unknown')}")
-            with col2:
-                st.info(f"📅 **Uploaded:** {st.session_state.logistics_b2b.get('uploaded_at', 'Unknown')[:10]}")
-            with col3:
-                st.info(f"📋 **Type:** {st.session_state.logistics_b2b.get('type', 'Unknown').upper()}")
+            st.info(f"📁 **File:** {st.session_state.logistics_b2b.get('filename', 'Unknown')}")
             
             if st.session_state.logistics_b2b.get('type') == 'pdf':
-                # Show PDF content
                 with st.expander("📄 View PDF Content"):
-                    st.text_area("Extracted Text", 
-                                st.session_state.logistics_b2b.get('raw_text', '')[:3000], 
-                                height=400, key="b2b_pdf_view")
-                
-                if 'rules' in st.session_state.logistics_b2b:
-                    st.markdown("#### Parsed Rules")
-                    df_rules = pd.DataFrame(st.session_state.logistics_b2b['rules'])
-                    st.dataframe(df_rules.head(20), use_container_width=True)
-            
+                    st.text_area("Text", st.session_state.logistics_b2b.get('raw_text', '')[:2000], height=300)
             elif 'rules' in st.session_state.logistics_b2b:
                 df_rules = pd.DataFrame(st.session_state.logistics_b2b['rules'])
                 st.dataframe(df_rules.head(20), use_container_width=True)
-                
-                # Download button for rules
-                csv = df_rules.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Rules as CSV",
-                    data=csv,
-                    file_name="b2b_logistics_rules.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.warning("⚠️ No B2B shipping rules loaded yet.")
     
     with tab2:
         st.markdown("### Upload B2C Rate Card")
-        uploaded_b2c = st.file_uploader("Upload B2C Rate Card (CSV/JSON/PDF)", 
-                                        type=['csv', 'json', 'pdf'], key="b2c")
+        uploaded_b2c = st.file_uploader("Upload (CSV/JSON/PDF)", type=['csv', 'json', 'pdf'], key="b2c")
         
         if uploaded_b2c and st.button("Import B2C Rules"):
             try:
                 if uploaded_b2c.name.endswith('.pdf'):
-                    if not PDF_SUPPORT:
-                        st.error("❌ PDF support not available. Please install PyPDF2: pip install PyPDF2")
-                    else:
+                    if PDF_SUPPORT:
                         pdf_text = parse_pdf_to_text(uploaded_b2c)
                         if pdf_text:
                             st.session_state.logistics_b2c = {
@@ -617,32 +670,23 @@ elif page == "Logistics Rules":
                                 'filename': uploaded_b2c.name,
                                 'type': 'pdf'
                             }
-                            
-                            parsed_rules = parse_logistics_pdf(pdf_text)
-                            if parsed_rules:
-                                st.session_state.logistics_b2c['rules'] = parsed_rules
-                            
                             save_all_data()
-                            st.success("✅ B2C PDF shipping rules imported!")
-                            
-                            with st.expander("📄 View Extracted Text"):
-                                st.text_area("PDF Content", pdf_text[:2000], height=300)
-                        else:
-                            st.error("❌ Failed to extract text from PDF")
+                            st.success("✅ B2C PDF imported!")
+                    else:
+                        st.error("❌ PDF support not available")
                 
                 elif uploaded_b2c.name.endswith('.csv'):
                     df = pd.read_csv(uploaded_b2c)
-                    rules = df.to_dict('records')
                     st.session_state.logistics_b2c = {
-                        'rules': rules,
+                        'rules': df.to_dict('records'),
                         'uploaded_at': datetime.now().isoformat(),
                         'filename': uploaded_b2c.name,
                         'type': 'csv'
                     }
                     save_all_data()
-                    st.success("✅ B2C CSV shipping rules imported!")
+                    st.success("✅ B2C CSV imported!")
                 
-                else:  # JSON
+                else:
                     rules = json.load(uploaded_b2c)
                     st.session_state.logistics_b2c = {
                         'rules': rules,
@@ -651,103 +695,108 @@ elif page == "Logistics Rules":
                         'type': 'json'
                     }
                     save_all_data()
-                    st.success("✅ B2C JSON shipping rules imported!")
-                    
+                    st.success("✅ B2C JSON imported!")
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
         
-        # Display current rules
         if st.session_state.logistics_b2c:
             st.markdown("---")
-            st.markdown("### Current B2C Rules")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.info(f"📁 **File:** {st.session_state.logistics_b2c.get('filename', 'Unknown')}")
-            with col2:
-                st.info(f"📅 **Uploaded:** {st.session_state.logistics_b2c.get('uploaded_at', 'Unknown')[:10]}")
-            with col3:
-                st.info(f"📋 **Type:** {st.session_state.logistics_b2c.get('type', 'Unknown').upper()}")
+            st.info(f"📁 **File:** {st.session_state.logistics_b2c.get('filename', 'Unknown')}")
             
             if st.session_state.logistics_b2c.get('type') == 'pdf':
                 with st.expander("📄 View PDF Content"):
-                    st.text_area("Extracted Text", 
-                                st.session_state.logistics_b2c.get('raw_text', '')[:3000], 
-                                height=400, key="b2c_pdf_view")
-                
-                if 'rules' in st.session_state.logistics_b2c:
-                    st.markdown("#### Parsed Rules")
-                    df_rules = pd.DataFrame(st.session_state.logistics_b2c['rules'])
-                    st.dataframe(df_rules.head(20), use_container_width=True)
-            
+                    st.text_area("Text", st.session_state.logistics_b2c.get('raw_text', '')[:2000], height=300)
             elif 'rules' in st.session_state.logistics_b2c:
                 df_rules = pd.DataFrame(st.session_state.logistics_b2c['rules'])
                 st.dataframe(df_rules.head(20), use_container_width=True)
-                
-                csv = df_rules.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Rules as CSV",
-                    data=csv,
-                    file_name="b2c_logistics_rules.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.warning("⚠️ No B2C shipping rules loaded yet.")
 
 # ============================================================================
-# PAGE: GRN MANAGEMENT
+# PAGE: GRN MANAGEMENT (FIXED - Tabular view with checkboxes)
 # ============================================================================
 elif page == "GRN Management":
     st.title("📋 GRN Management")
     
-    grn_method = st.radio("Select GRN Method", ["Upload GRN Report", "Manual Bulk Update"])
+    grn_method = st.radio("Method", ["Tabular Bulk Update", "Upload GRN Report"], horizontal=True)
     
-    if grn_method == "Upload GRN Report":
+    if grn_method == "Tabular Bulk Update":
+        st.markdown("### Pending GRN Invoices")
+        
+        pending_invoices = [inv for inv in st.session_state.invoices if inv.get('grn_status') == 'Pending']
+        
+        if pending_invoices:
+            # Create DataFrame for display
+            pending_df = pd.DataFrame(pending_invoices)
+            pending_df['select'] = False  # Add checkbox column
+            
+            # Display with checkboxes
+            display_cols = ['select', 'invoice_number', 'date', 'customer_name', 'item_name', 'quantity', 'total']
+            if all(col in pending_df.columns for col in display_cols):
+                edited_df = st.data_editor(
+                    pending_df[display_cols],
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "select": st.column_config.CheckboxColumn("Select", default=False),
+                        "invoice_number": st.column_config.TextColumn("Invoice #", disabled=True),
+                        "date": st.column_config.TextColumn("Date", disabled=True),
+                        "customer_name": st.column_config.TextColumn("Customer", disabled=True),
+                        "item_name": st.column_config.TextColumn("Item", disabled=True),
+                        "quantity": st.column_config.NumberColumn("Qty", disabled=True),
+                        "total": st.column_config.NumberColumn("Amount", format="₹%.2f", disabled=True)
+                    },
+                    key="grn_table"
+                )
+                
+                col1, col2 = st.columns([2, 4])
+                with col1:
+                    grn_date = st.date_input("GRN Date", datetime.now())
+                with col2:
+                    if st.button("✅ Mark Selected as GRN", type="primary"):
+                        selected_count = 0
+                        selected_invoices = edited_df[edited_df['select'] == True]['invoice_number'].tolist()
+                        
+                        for i, inv in enumerate(st.session_state.invoices):
+                            if inv.get('invoice_number') in selected_invoices:
+                                st.session_state.invoices[i]['grn_status'] = 'Completed'
+                                st.session_state.invoices[i]['grn_date'] = str(grn_date)
+                                
+                                # Calculate credit expiry
+                                customer = inv.get('customer_name', '')
+                                credit_days = st.session_state.customers.get(customer, {}).get('credit_days', 30)
+                                expiry_date = grn_date + timedelta(days=credit_days)
+                                st.session_state.invoices[i]['credit_expiry'] = str(expiry_date)
+                                selected_count += 1
+                        
+                        save_all_data()
+                        st.success(f"✅ Marked {selected_count} invoices as GRN!")
+                        st.rerun()
+        else:
+            st.success("✅ All invoices have GRN!")
+    
+    else:  # Upload GRN Report
         uploaded_grn = st.file_uploader("Upload GRN Report (CSV)", type=['csv'])
         
-        if uploaded_grn and st.button("Process GRN Report"):
+        if uploaded_grn and st.button("Process GRN"):
             df_grn = pd.read_csv(uploaded_grn)
             matched = 0
             for _, row in df_grn.iterrows():
                 invoice_num = str(row.get('Invoice Number', ''))
                 grn_date = str(row.get('GRN Date', ''))
                 
-                for inv in st.session_state.invoices:
+                for i, inv in enumerate(st.session_state.invoices):
                     if inv.get('invoice_number') == invoice_num:
-                        inv['grn_status'] = 'Completed'
-                        inv['grn_date'] = grn_date
+                        st.session_state.invoices[i]['grn_status'] = 'Completed'
+                        st.session_state.invoices[i]['grn_date'] = grn_date
                         matched += 1
             
             save_all_data()
             st.success(f"✅ {matched} invoices updated!")
     
-    else:
-        pending_invoices = [inv for inv in st.session_state.invoices if inv.get('grn_status') == 'Pending']
-        
-        if pending_invoices:
-            selected_indices = st.multiselect(
-                "Select invoices to mark as GRN",
-                options=range(len(pending_invoices)),
-                format_func=lambda x: f"{pending_invoices[x]['invoice_number']} - ₹{pending_invoices[x]['total']:.2f}"
-            )
-            
-            grn_date = st.date_input("GRN Date", datetime.now())
-            
-            if st.button("✅ Mark Selected as GRN"):
-                for idx in selected_indices:
-                    inv = pending_invoices[idx]
-                    for i, invoice in enumerate(st.session_state.invoices):
-                        if invoice.get('invoice_number') == inv['invoice_number']:
-                            st.session_state.invoices[i]['grn_status'] = 'Completed'
-                            st.session_state.invoices[i]['grn_date'] = str(grn_date)
-                
-                save_all_data()
-                st.success(f"✅ Marked {len(selected_indices)} invoices as GRN!")
-                st.rerun()
-        else:
-            st.success("✅ All invoices marked as GRN!")
-    
+    # Summary
+    st.markdown("---")
     total = len(st.session_state.invoices)
     completed = sum(1 for inv in st.session_state.invoices if inv.get('grn_status') == 'Completed')
+    
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Total Invoices", total)
@@ -757,14 +806,14 @@ elif page == "GRN Management":
         st.metric("GRN Pending", total - completed)
 
 # ============================================================================
-# PAGE: BANK RECONCILIATION
+# PAGE: BANK RECONCILIATION (FIXED - Error handling)
 # ============================================================================
 elif page == "Bank Reconciliation":
     st.title("🏦 Bank Reconciliation")
     
     st.markdown("""
     <div class="info-box">
-    Upload bank statements and map transactions to customers. Once mapped, only new transactions need mapping.
+    Upload bank statements and map transactions. Once mapped, only new transactions need mapping.
     </div>
     """, unsafe_allow_html=True)
     
@@ -772,48 +821,69 @@ elif page == "Bank Reconciliation":
     
     if uploaded_bank and st.button("🚀 Import Bank Statement"):
         try:
-            df_bank = pd.read_csv(uploaded_bank)
+            # Read CSV with error handling
+            df_bank = pd.read_csv(uploaded_bank, encoding='utf-8', on_bad_lines='skip')
             df_bank.columns = df_bank.columns.str.strip()
             
             new_count = 0
             duplicate_count = 0
-            existing_hashes = set(t.get('hash') for t in st.session_state.bank_statements)
+            existing_hashes = set(t.get('hash', '') for t in st.session_state.bank_statements)
             
-            for _, row in df_bank.iterrows():
-                if pd.isna(row.get('Transaction Date')):
+            for idx, row in df_bank.iterrows():
+                # Skip header rows or empty rows
+                if pd.isna(row.get('Transaction Date')) or str(row.get('Transaction Date')).strip() == '':
                     continue
                 
-                trans_dict = {
-                    'date': str(row.get('Transaction Date', '')),
-                    'description': str(row.get('Description', '')),
-                    'amount': str(row.get('Amount', ''))
-                }
-                trans_hash = get_row_hash(trans_dict)
-                
-                if trans_hash in existing_hashes:
-                    duplicate_count += 1
+                # Skip if it's a header row
+                if str(row.get('Transaction Date')).strip().lower() in ['transaction date', 'sl. no.']:
                     continue
                 
-                transaction = {
-                    'date': str(row.get('Transaction Date', '')),
-                    'description': str(row.get('Description', '')),
-                    'reference': str(row.get('Chq / Ref No.', '')),
-                    'amount': float(str(row.get('Amount', '0')).replace(',', '')),
-                    'type': str(row.get('Dr / Cr', '')),
-                    'hash': trans_hash,
-                    'customer': None,
-                    'mapped': False
-                }
-                
-                st.session_state.bank_statements.append(transaction)
-                new_count += 1
+                try:
+                    trans_dict = {
+                        'date': str(row.get('Transaction Date', '')),
+                        'description': str(row.get('Description', '')),
+                        'amount': str(row.get('Amount', '0'))
+                    }
+                    trans_hash = get_row_hash(trans_dict)
+                    
+                    if trans_hash in existing_hashes:
+                        duplicate_count += 1
+                        continue
+                    
+                    # Parse amount (remove commas)
+                    amount_str = str(row.get('Amount', '0')).replace(',', '').strip()
+                    try:
+                        amount = float(amount_str) if amount_str else 0.0
+                    except:
+                        amount = 0.0
+                    
+                    transaction = {
+                        'date': str(row.get('Transaction Date', '')),
+                        'description': str(row.get('Description', '')),
+                        'reference': str(row.get('Chq / Ref No.', row.get('Reference', ''))),
+                        'amount': amount,
+                        'type': str(row.get('Dr / Cr', '')),
+                        'hash': trans_hash,
+                        'customer': None,
+                        'mapped': False
+                    }
+                    
+                    st.session_state.bank_statements.append(transaction)
+                    existing_hashes.add(trans_hash)
+                    new_count += 1
+                except Exception as e:
+                    st.warning(f"Skipped row {idx}: {str(e)}")
+                    continue
             
             save_all_data()
-            st.success(f"✅ {new_count} new transactions, {duplicate_count} duplicates skipped!")
+            st.success(f"✅ {new_count} new, {duplicate_count} duplicates skipped!")
             st.rerun()
+            
         except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
+            st.error(f"❌ Error processing file: {str(e)}")
+            st.info("💡 Tip: Ensure your CSV has columns: Transaction Date, Description, Amount, Dr / Cr")
     
+    # Transaction mapping
     unmapped = [t for t in st.session_state.bank_statements if not t.get('mapped', False)]
     
     if unmapped:
@@ -821,12 +891,12 @@ elif page == "Bank Reconciliation":
         customer_list = ['[Skip]'] + list(st.session_state.customers.keys())
         
         for i, trans in enumerate(unmapped[:10]):
-            with st.expander(f"₹{trans['amount']:,.2f} - {trans['description'][:50]}"):
+            with st.expander(f"₹{trans.get('amount', 0):,.2f} - {trans.get('description', '')[:50]}"):
                 selected = st.selectbox("Map to Customer", customer_list, key=f"map_{i}")
                 
                 if st.button("Save", key=f"save_{i}"):
                     for t in st.session_state.bank_statements:
-                        if t['hash'] == trans['hash']:
+                        if t.get('hash') == trans.get('hash'):
                             t['customer'] = None if selected == '[Skip]' else selected
                             t['mapped'] = True
                             break
@@ -836,6 +906,7 @@ elif page == "Bank Reconciliation":
     else:
         st.success("✅ All transactions mapped!")
     
+    # Summary
     if st.session_state.bank_statements:
         df = pd.DataFrame(st.session_state.bank_statements)
         col1, col2, col3, col4 = st.columns(4)
@@ -844,12 +915,14 @@ elif page == "Bank Reconciliation":
         with col2:
             st.metric("Mapped", len(df[df['mapped'] == True]))
         with col3:
-            st.metric("Credits", f"₹{df[df['type']=='CR']['amount'].sum():,.2f}")
+            credits = df[df['type'] == 'CR']['amount'].sum()
+            st.metric("Credits", f"₹{credits:,.2f}")
         with col4:
-            st.metric("Debits", f"₹{df[df['type']=='DR']['amount'].sum():,.2f}")
+            debits = df[df['type'] == 'DR']['amount'].sum()
+            st.metric("Debits", f"₹{debits:,.2f}")
 
 # ============================================================================
-# PAGE: RECEIVABLES
+# PAGE: RECEIVABLES (With credit days tracking)
 # ============================================================================
 elif page == "Receivables":
     st.title("💰 Receivables Dashboard")
@@ -861,11 +934,20 @@ elif page == "Receivables":
             if customer not in receivables:
                 receivables[customer] = {'customer': customer, 'total_due': 0, 'invoices': []}
             
-            try:
-                due_date = datetime.strptime(inv['due_date'], '%Y-%m-%d')
-                days_overdue = (datetime.now() - due_date).days
-            except:
-                days_overdue = 0
+            # Calculate days based on credit expiry (from GRN date + credit days)
+            if inv.get('credit_expiry'):
+                try:
+                    expiry_date = datetime.strptime(inv['credit_expiry'], '%Y-%m-%d')
+                    days_overdue = (datetime.now() - expiry_date).days
+                except:
+                    days_overdue = 0
+            else:
+                # Fallback to due date
+                try:
+                    due_date = datetime.strptime(inv['due_date'], '%Y-%m-%d')
+                    days_overdue = (datetime.now() - due_date).days
+                except:
+                    days_overdue = 0
             
             receivables[customer]['total_due'] += inv['balance']
             receivables[customer]['invoices'].append({**inv, 'days_overdue': days_overdue})
@@ -890,7 +972,7 @@ elif page == "Receivables":
                 'Total Due': data['total_due'],
                 'Invoices': len(data['invoices']),
                 'Max Overdue': max_overdue,
-                'Status': 'Current' if max_overdue == 0 else f'{max_overdue} days'
+                'Status': 'Current' if max_overdue <= 0 else f'{max_overdue} days'
             })
         
         df = pd.DataFrame(receivables_list).sort_values('Total Due', ascending=False)
@@ -906,7 +988,7 @@ elif page == "Marketing Spends":
     
     uploaded_marketing = st.file_uploader("Upload Marketing CSV", type=['csv'])
     
-    if uploaded_marketing and st.button("Import Marketing Data"):
+    if uploaded_marketing and st.button("Import"):
         df = pd.read_csv(uploaded_marketing)
         for _, row in df.iterrows():
             st.session_state.marketing.append({
@@ -919,7 +1001,7 @@ elif page == "Marketing Spends":
                 'roas': float(row.get('ROAS', 0))
             })
         save_all_data()
-        st.success("✅ Marketing data imported!")
+        st.success("✅ Imported!")
         st.rerun()
     
     if st.session_state.marketing:
@@ -933,7 +1015,7 @@ elif page == "Marketing Spends":
         with col2:
             st.metric("💰 Total Revenue", f"₹{total_revenue:,.2f}")
         with col3:
-            st.metric("📊 Avg ROAS", f"{(total_revenue/total_spend):.2f}x" if total_spend > 0 else "0.00x")
+            st.metric("📊 Avg ROAS", f"{(total_revenue/total_spend):.2f}x" if total_spend > 0 else "0x")
         
         st.dataframe(df, use_container_width=True)
 
@@ -954,11 +1036,12 @@ elif page == "P&L Dashboard":
         selected_product = st.selectbox("Product", products[:20])
     
     with col3:
-        date_from = st.date_input("From Date", datetime.now() - timedelta(days=30))
+        date_from = st.date_input("From", datetime.now() - timedelta(days=30))
     
     with col4:
-        date_to = st.date_input("To Date", datetime.now())
+        date_to = st.date_input("To", datetime.now())
     
+    # Filter invoices
     filtered = st.session_state.invoices
     
     if selected_channel != 'All':
@@ -972,6 +1055,7 @@ elif page == "P&L Dashboard":
     if filtered:
         sales = sum(inv.get('item_total', 0) for inv in filtered)
         
+        # COGS calculation
         cogs = 0
         for inv in filtered:
             sku = inv.get('sku', '')
@@ -979,6 +1063,7 @@ elif page == "P&L Dashboard":
             if sku in st.session_state.item_master:
                 cogs += st.session_state.item_master[sku].get('cogs', 0) * qty
         
+        # Shipping cost (simplified for now - can be enhanced with rate calculator)
         shipping = 0
         for inv in filtered:
             customer = inv.get('customer_name', '')
@@ -986,6 +1071,7 @@ elif page == "P&L Dashboard":
             cust_type = st.session_state.customers.get(customer, {}).get('type', 'B2C')
             shipping += qty * (30 if cust_type == 'B2B' else 45)
         
+        # Marketing spend
         marketing_spend = 0
         for spend in st.session_state.marketing:
             spend_date = datetime.strptime(spend['date'].split('T')[0], '%Y-%m-%d').date()
@@ -995,6 +1081,7 @@ elif page == "P&L Dashboard":
         
         brand_marketing = marketing_spend * 0.1
         
+        # Calculate margins
         gross_margin = sales - cogs
         gross_margin_pct = (gross_margin / sales * 100) if sales > 0 else 0
         
@@ -1039,18 +1126,19 @@ elif page == "P&L Dashboard":
         with col4:
             st.metric("✨ CM3 %", f"{cm3_pct:.1f}%")
         
+        # Waterfall chart
         fig = go.Figure(go.Waterfall(
-            x = ['Sales', 'COGS', 'Gross Margin', 'Shipping', 'CM1', 'Perf Mktg', 'CM2', 'Brand Mktg', 'CM3'],
+            x = ['Sales', 'COGS', 'GM', 'Shipping', 'CM1', 'Perf Mktg', 'CM2', 'Brand Mktg', 'CM3'],
             y = [sales, -cogs, 0, -shipping, 0, -marketing_spend, 0, -brand_marketing, 0],
             measure = ['absolute', 'relative', 'total', 'relative', 'total', 'relative', 'total', 'relative', 'total'],
             decreasing = {"marker":{"color":"#ef4444"}},
             increasing = {"marker":{"color":"#10b981"}},
             totals = {"marker":{"color":"#facc15"}}
         ))
-        fig.update_layout(title="P&L Waterfall Analysis", template="plotly_dark", height=500)
+        fig.update_layout(title="P&L Waterfall", template="plotly_dark", height=500)
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.warning("⚠️ No data for selected filters.")
+        st.warning("⚠️ No data for selected filters")
 
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #64748b;'><strong>P&L Management System</strong> | Built with Streamlit</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align: center; color: #64748b;'><strong>P&L Management System</strong> | Data persists across sessions</div>", unsafe_allow_html=True)
