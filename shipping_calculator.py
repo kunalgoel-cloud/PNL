@@ -1,16 +1,15 @@
 # ============================================================================
-# SHIPPING CALCULATOR MODULE
+# SHIPPING CALCULATOR MODULE - EXACT LOGIC FROM REFERENCE APP
 # Save this as: shipping_calculator.py
 # Place in same folder as your main app
 # ============================================================================
 
 """
-HOW TO USE:
-1. Save this file as shipping_calculator.py
-2. In your main app, the shipping calculator page will use this
-3. Make sure Item Master has: dead_weight_kg and volumetric_weight_kg columns
-4. Make sure Customers has: is_marketplace column
+This module contains the EXACT shipping calculation logic from the reference app.
+Updated to match all edge cases, rounding rules, and zone determination logic.
 """
+
+import pandas as pd
 
 # ============================================================================
 # CONSTANTS
@@ -21,26 +20,50 @@ DEFAULT_ORIGIN_CITY = "MUMBAI"
 DEFAULT_ORIGIN_STATE = "MAHARASHTRA"
 ORIGIN_B2B_ZONE = "West-2"  # Mumbai is in West-2 zone
 
+# Special zones
+SPECIAL_ZONES = ['Jammu and Kashmir', 'Himachal Pradesh', 'Kerala', 
+                 'Andaman', 'Lakshadweep', 'Leh', 'Ladakh',
+                 'Arunachal Pradesh', 'Assam', 'Manipur', 'Meghalaya', 
+                 'Mizoram', 'Nagaland', 'Tripura', 'Sikkim',
+                 'J&K', 'HP', 'KL', 'AN', 'LD', 'AR', 'AS', 'MN', 'ML', 'MZ', 'NL', 'TR', 'SK']
+
 # ============================================================================
-# B2C RATE CARD (From Enterprise Commercials PDF)
+# B2C RATE CARD (EXACT FROM REFERENCE APP)
 # ============================================================================
 
 B2C_RATE_CARD = {
-    'Delhivery': {
-        'Local': {'0-500': 21.0, 'add_500': 17.0, '2kg': 71.0, 'add_1kg_2-5': 27.0, '5kg': 145.0, 'add_1kg_5-10': 23.0, '10kg': 238.0, 'add_1kg_10+': 14.0},
-        'Within State': {'0-500': 25.0, 'add_500': 21.0, '2kg': 83.0, 'add_1kg_2-5': 32.0, '5kg': 150.0, 'add_1kg_5-10': 24.0, '10kg': 260.0, 'add_1kg_10+': 17.0},
-        'Metro to Metro': {'0-500': 31.0, 'add_500': 24.0, '2kg': 90.0, 'add_1kg_2-5': 35.0, '5kg': 178.0, 'add_1kg_5-10': 24.0, '10kg': 281.0, 'add_1kg_10+': 17.0},
-        'Rest of India': {'0-500': 34.0, 'add_500': 23.0, '2kg': 97.0, 'add_1kg_2-5': 37.0, '5kg': 199.0, 'add_1kg_5-10': 25.0, '10kg': 299.0, 'add_1kg_10+': 18.0},
-        'Special Zone': {'0-500': 39.0, 'add_500': 25.0, '2kg': 109.0, 'add_1kg_2-5': 39.0, '5kg': 239.0, 'add_1kg_5-10': 35.0, '10kg': 387.0, 'add_1kg_10+': 22.0}
-    },
-    'Bluedart': {
+    'Bluedart Surface': {
         'Local': {'0-500': 30.0, 'add_500': 24.0, '2kg': 96.0, 'add_1kg_2-5': 46.0, '5kg': 227.0, 'add_1kg_5-10': 45.0, '10kg': 449.0, 'add_1kg_10+': 44.0},
         'Within State': {'0-500': 36.0, 'add_500': 26.0, '2kg': 104.0, 'add_1kg_2-5': 49.0, '5kg': 250.0, 'add_1kg_5-10': 47.2, '10kg': 477.0, 'add_1kg_10+': 47.0},
         'Metro to Metro': {'0-500': 42.0, 'add_500': 33.0, '2kg': 134.0, 'add_1kg_2-5': 63.0, '5kg': 312.0, 'add_1kg_5-10': 61.0, '10kg': 617.0, 'add_1kg_10+': 61.0},
         'Rest of India': {'0-500': 47.0, 'add_500': 38.0, '2kg': 153.0, 'add_1kg_2-5': 72.0, '5kg': 355.0, 'add_1kg_5-10': 69.0, '10kg': 700.0, 'add_1kg_10+': 69.0},
-        'Special Zone': {'0-500': 56.0, 'add_500': 50.0, '2kg': 202.0, 'add_1kg_2-5': 95.0, '5kg': 469.0, 'add_1kg_5-10': 92.0, '10kg': 924.0, 'add_1kg_10+': 91.0}
+        'Special Zone': {'0-500': 56.0, 'add_500': 50.0, '2kg': 202.0, 'add_1kg_2-5': 95.0, '5kg': 469.0, 'add_1kg_5-10': 92.0, '10kg': 924.0, 'add_1kg_10+': 91.0},
+    },
+    'Bluedart Air': {
+        'Local': {'0-500': 36.0, 'add_500': 35.0},
+        'Within State': {'0-500': 40.0, 'add_500': 39.0},
+        'Metro to Metro': {'0-500': 46.0, 'add_500': 46.0},
+        'Rest of India': {'0-500': 57.0, 'add_500': 55.0},
+        'Special Zone': {'0-500': 76.0, 'add_500': 74.0},
+    },
+    'Delhivery Surface': {
+        'Local': {'0-500': 21.0, 'add_500': 17.0, '2kg': 71.0, 'add_1kg_2-5': 27.0, '5kg': 145.0, 'add_1kg_5-10': 23.0, '10kg': 238.0, 'add_1kg_10+': 14.0},
+        'Within State': {'0-500': 25.0, 'add_500': 21.0, '2kg': 83.0, 'add_1kg_2-5': 32.0, '5kg': 150.0, 'add_1kg_5-10': 24.0, '10kg': 260.0, 'add_1kg_10+': 17.0},
+        'Metro to Metro': {'0-500': 31.0, 'add_500': 24.0, '2kg': 90.0, 'add_1kg_2-5': 35.0, '5kg': 178.0, 'add_1kg_5-10': 24.0, '10kg': 281.0, 'add_1kg_10+': 17.0},
+        'Rest of India': {'0-500': 34.0, 'add_500': 23.0, '2kg': 97.0, 'add_1kg_2-5': 37.0, '5kg': 199.0, 'add_1kg_5-10': 25.0, '10kg': 299.0, 'add_1kg_10+': 18.0},
+        'Special Zone': {'0-500': 39.0, 'add_500': 25.0, '2kg': 109.0, 'add_1kg_2-5': 39.0, '5kg': 239.0, 'add_1kg_5-10': 35.0, '10kg': 387.0, 'add_1kg_10+': 22.0},
+    },
+    'Delhivery Air': {
+        'Local': {'0-500': 30.0, 'add_500': 28.0},
+        'Within State': {'0-500': 35.0, 'add_500': 34.0},
+        'Metro to Metro': {'0-500': 46.0, 'add_500': 38.0},
+        'Rest of India': {'0-500': 56.0, 'add_500': 48.0},
+        'Special Zone': {'0-500': 68.0, 'add_500': 62.0},
     }
 }
+
+# Default courier for B2C
+DEFAULT_B2C_COURIER = 'Delhivery Surface'
 
 # ============================================================================
 # B2B RATE CARD (From Safexpress PDF)
@@ -69,90 +92,240 @@ B2B_METRO_CHARGE = 100
 
 # Zone mapping
 B2B_ZONE_MAP = {
-    'North-1': ['Delhi', 'Uttar Pradesh', 'Haryana', 'Rajasthan', 'UP', 'DL', 'HR', 'RJ'],
-    'North-2': ['Chandigarh', 'Punjab', 'Himachal Pradesh', 'Uttarakhand', 'Jammu', 'Kashmir', 'Ladakh', 'PB', 'HP', 'UK', 'JK'],
-    'East': ['West Bengal', 'Odisha', 'Bihar', 'Jharkhand', 'Chhattisgarh', 'WB', 'OR', 'BR', 'JH', 'CG'],
-    'North-East': ['Assam', 'Meghalaya', 'Tripura', 'Arunachal Pradesh', 'Mizoram', 'Manipur', 'Nagaland', 'Sikkim'],
-    'West-1': ['Gujarat', 'Daman', 'Diu', 'Dadra', 'GJ', 'DN', 'DD'],
-    'West-2': ['Maharashtra', 'Goa', 'MH', 'GA'],
-    'South-1': ['Andhra Pradesh', 'Telangana', 'Karnataka', 'Tamil Nadu', 'Puducherry', 'AP', 'TG', 'KA', 'TN', 'PY'],
-    'South-2': ['Kerala', 'KL'],
-    'Central': ['Madhya Pradesh', 'MP']
+    'North-1': ['DELHI', 'UTTAR PRADESH', 'HARYANA', 'RAJASTHAN', 'UP', 'DL', 'HR', 'RJ'],
+    'North-2': ['CHANDIGARH', 'PUNJAB', 'HIMACHAL PRADESH', 'UTTARAKHAND', 'JAMMU', 'KASHMIR', 'LADAKH', 'PB', 'HP', 'UK', 'JK', 'J&K'],
+    'East': ['WEST BENGAL', 'ODISHA', 'BIHAR', 'JHARKHAND', 'CHHATTISGARH', 'WB', 'OR', 'BR', 'JH', 'CG'],
+    'North-East': ['ASSAM', 'MEGHALAYA', 'TRIPURA', 'ARUNACHAL PRADESH', 'MIZORAM', 'MANIPUR', 'NAGALAND', 'SIKKIM', 'AS', 'ML', 'TR', 'AR', 'MZ', 'MN', 'NL', 'SK'],
+    'West-1': ['GUJARAT', 'DAMAN', 'DIU', 'DADRA', 'NAGAR HAVELI', 'GJ', 'DN', 'DD'],
+    'West-2': ['MAHARASHTRA', 'GOA', 'MH', 'GA'],
+    'South-1': ['ANDHRA PRADESH', 'TELANGANA', 'KARNATAKA', 'TAMIL NADU', 'TAMILNADU', 'PUDUCHERRY', 'AP', 'TG', 'KA', 'TN', 'PY'],
+    'South-2': ['KERALA', 'KL'],
+    'Central': ['MADHYA PRADESH', 'MP']
 }
 
-SPECIAL_ZONES = ['J&K', 'Himachal Pradesh', 'HP', 'Kerala', 'KL', 'Andaman', 'Lakshadweep', 'Leh', 'Ladakh',
-                 'Arunachal Pradesh', 'Assam', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Tripura', 'Sikkim']
-
-LOCAL_MUMBAI = ['MUMBAI', 'NAVI MUMBAI', 'THANE', 'KALYAN', 'BHIWANDI', 'VASAI']
-METRO_CITIES = ['DELHI', 'NEW DELHI', 'CHENNAI', 'KOLKATA', 'BANGALORE', 'BENGALURU', 'MUMBAI', 'PUNE', 'AHMEDABAD', 'HYDERABAD']
+METRO_CITIES = ['DELHI', 'MUMBAI', 'BANGALORE', 'KOLKATA', 'CHENNAI', 'NEW DELHI', 'NAVI MUMBAI', 'BENGALURU', 'HYDERABAD', 'PUNE', 'AHMEDABAD']
 
 # ============================================================================
-# ZONE DETERMINATION FUNCTIONS
+# ZONE DETERMINATION (EXACT LOGIC FROM REFERENCE APP)
 # ============================================================================
 
-def determine_b2c_zone(dest_city, dest_state):
-    """Determine B2C zone from Mumbai origin"""
-    dest_city_upper = str(dest_city).strip().upper()
-    dest_state_upper = str(dest_state).strip().upper()
+def determine_zone(origin_city, dest_city, dest_state, origin_state=None):
+    """
+    Determine shipping zone based on origin and destination
+    EXACT LOGIC FROM REFERENCE APP
+    """
+    origin_city = str(origin_city).strip().title() if pd.notna(origin_city) else ""
+    dest_city = str(dest_city).strip().title() if pd.notna(dest_city) else ""
+    dest_state = str(dest_state).strip().upper() if pd.notna(dest_state) else ""
+    origin_state = str(origin_state).strip().upper() if pd.notna(origin_state) and origin_state else "MAHARASHTRA"
     
-    # Special zones
-    for special in SPECIAL_ZONES:
-        if special.upper() in dest_state_upper or special.upper() in dest_city_upper:
+    # Normalize state names - EXACT MAPPING FROM REFERENCE
+    state_mapping = {
+        'MH': 'MAHARASHTRA', 'MAHARASHTRA': 'MAHARASHTRA',
+        'DL': 'DELHI', 'DELHI': 'DELHI',
+        'KA': 'KARNATAKA', 'KARNATAKA': 'KARNATAKA',
+        'TN': 'TAMIL NADU', 'TAMILNADU': 'TAMIL NADU', 'TAMIL NADU': 'TAMIL NADU',
+        'WB': 'WEST BENGAL', 'WEST BENGAL': 'WEST BENGAL',
+        'GJ': 'GUJARAT', 'GUJARAT': 'GUJARAT',
+        'UP': 'UTTAR PRADESH', 'UTTAR PRADESH': 'UTTAR PRADESH',
+        'RJ': 'RAJASTHAN', 'RAJASTHAN': 'RAJASTHAN',
+        'HR': 'HARYANA', 'HARYANA': 'HARYANA',
+        'PB': 'PUNJAB', 'PUNJAB': 'PUNJAB',
+        'AP': 'ANDHRA PRADESH', 'ANDHRA PRADESH': 'ANDHRA PRADESH',
+        'TG': 'TELANGANA', 'TELANGANA': 'TELANGANA',
+        'KL': 'KERALA', 'KERALA': 'KERALA',
+        'OR': 'ODISHA', 'ODISHA': 'ODISHA',
+        'BR': 'BIHAR', 'BIHAR': 'BIHAR',
+        'JH': 'JHARKHAND', 'JHARKHAND': 'JHARKHAND',
+        'CG': 'CHHATTISGARH', 'CHHATTISGARH': 'CHHATTISGARH',
+        'MP': 'MADHYA PRADESH', 'MADHYA PRADESH': 'MADHYA PRADESH',
+        'AS': 'ASSAM', 'ASSAM': 'ASSAM',
+        'HP': 'HIMACHAL PRADESH', 'HIMACHAL PRADESH': 'HIMACHAL PRADESH',
+        'J&K': 'JAMMU AND KASHMIR', 'JAMMU AND KASHMIR': 'JAMMU AND KASHMIR',
+        'JK': 'JAMMU AND KASHMIR',
+        'UT': 'UTTARAKHAND', 'UTTARAKHAND': 'UTTARAKHAND'
+    }
+    
+    # Normalize origin and destination states
+    for code, full_name in state_mapping.items():
+        if code in origin_state:
+            origin_state = full_name
+            break
+    
+    for code, full_name in state_mapping.items():
+        if code in dest_state:
+            dest_state = full_name
+            break
+    
+    # Check for special zones first - EXACT LOGIC
+    special_zone_states = [
+        'JAMMU AND KASHMIR', 'HIMACHAL PRADESH', 'KERALA',
+        'ANDAMAN', 'LAKSHADWEEP', 'ARUNACHAL PRADESH', 
+        'ASSAM', 'MANIPUR', 'MEGHALAYA', 'MIZORAM', 
+        'NAGALAND', 'TRIPURA', 'SIKKIM'
+    ]
+    
+    special_zone_keywords = ['ANDAMAN', 'LAKSHADWEEP', 'LEH', 'LADAKH']
+    
+    for sz_state in special_zone_states:
+        if sz_state in dest_state:
             return 'Special Zone'
     
-    # Local
-    if any(area in dest_city_upper for area in LOCAL_MUMBAI):
-        return 'Local'
+    for keyword in special_zone_keywords:
+        if keyword in dest_state.upper() or keyword in dest_city.upper():
+            return 'Special Zone'
     
-    # Within State
-    if 'MAHARASHTRA' in dest_state_upper or 'MH' in dest_state_upper:
+    # Check if Local (same city or nearby areas in same metro) - EXACT LOGIC
+    local_city_groups = {
+        'MUMBAI': ['MUMBAI', 'NAVI MUMBAI', 'THANE', 'BHIWANDI', 'KALYAN', 'DOMBIVLI', 'VASAI', 'VIRAR'],
+        'DELHI': ['DELHI', 'NEW DELHI', 'GURGAON', 'GURUGRAM', 'NOIDA', 'GREATER NOIDA', 'FARIDABAD', 'GHAZIABAD'],
+        'BANGALORE': ['BANGALORE', 'BENGALURU', 'BANGALORE URBAN'],
+        'CHENNAI': ['CHENNAI'],
+        'KOLKATA': ['KOLKATA', 'HOWRAH'],
+        'PUNE': ['PUNE', 'PIMPRI', 'CHINCHWAD'],
+        'HYDERABAD': ['HYDERABAD', 'SECUNDERABAD']
+    }
+    
+    for metro, cities in local_city_groups.items():
+        origin_in_metro = any(city in origin_city.upper() for city in cities)
+        dest_in_metro = any(city in dest_city.upper() for city in cities)
+        if origin_in_metro and dest_in_metro:
+            return 'Local'
+    
+    # Check if metro to metro (different metros) - EXACT LOGIC
+    metro_cities_list = ['MUMBAI', 'NAVI MUMBAI', 'DELHI', 'NEW DELHI', 'BANGALORE', 
+                         'BENGALURU', 'CHENNAI', 'KOLKATA', 'HYDERABAD', 'PUNE']
+    
+    origin_is_metro = any(metro.upper() in origin_city.upper() for metro in metro_cities_list)
+    dest_is_metro = any(metro.upper() in dest_city.upper() for metro in metro_cities_list)
+    
+    if origin_is_metro and dest_is_metro:
+        # Check if same metro (should be Local, not Metro to Metro)
+        same_metro = False
+        for metro, cities in local_city_groups.items():
+            origin_in_metro = any(city in origin_city.upper() for city in cities)
+            dest_in_metro = any(city in dest_city.upper() for city in cities)
+            if origin_in_metro and dest_in_metro:
+                same_metro = True
+                break
+        
+        if not same_metro:
+            return 'Metro to Metro'
+    
+    # Check if within same state
+    if origin_state == dest_state:
         return 'Within State'
     
-    # Metro to Metro
-    if any(metro in dest_city_upper for metro in METRO_CITIES):
-        return 'Metro to Metro'
-    
+    # Default to Rest of India
     return 'Rest of India'
 
 def determine_b2b_zone(dest_state):
-    """Determine B2B zone from state"""
+    """Determine B2B zone from state - FOR SAFEXPRESS"""
     dest_state_upper = str(dest_state).strip().upper()
     
+    # Normalize state name first
+    state_mapping = {
+        'MH': 'MAHARASHTRA', 'DL': 'DELHI', 'KA': 'KARNATAKA',
+        'TN': 'TAMIL NADU', 'TAMILNADU': 'TAMIL NADU',
+        'WB': 'WEST BENGAL', 'GJ': 'GUJARAT', 'UP': 'UTTAR PRADESH',
+        'RJ': 'RAJASTHAN', 'HR': 'HARYANA', 'PB': 'PUNJAB',
+        'AP': 'ANDHRA PRADESH', 'TG': 'TELANGANA', 'KL': 'KERALA',
+        'OR': 'ODISHA', 'BR': 'BIHAR', 'JH': 'JHARKHAND',
+        'CG': 'CHHATTISGARH', 'MP': 'MADHYA PRADESH', 'AS': 'ASSAM',
+        'HP': 'HIMACHAL PRADESH', 'J&K': 'JAMMU AND KASHMIR',
+        'JK': 'JAMMU AND KASHMIR', 'UT': 'UTTARAKHAND'
+    }
+    
+    for code, full_name in state_mapping.items():
+        if code in dest_state_upper:
+            dest_state_upper = full_name
+            break
+    
+    # Find zone
     for zone, states in B2B_ZONE_MAP.items():
         for state in states:
-            if state.upper() in dest_state_upper:
+            if state in dest_state_upper:
                 return zone
     
-    return 'Central'
+    return 'Central'  # Default
 
 # ============================================================================
-# SHIPPING COST CALCULATION FUNCTIONS
+# COST CALCULATION (EXACT LOGIC FROM REFERENCE APP)
 # ============================================================================
 
-def calculate_b2c_cost(weight_kg, zone, courier='Delhivery'):
-    """Calculate B2C shipping cost"""
-    if courier not in B2C_RATE_CARD or zone not in B2C_RATE_CARD[courier]:
-        return 0, "Rate not found"
+def calculate_freight_cost(weight_kg, zone, courier):
+    """
+    Calculate freight cost based on weight, zone, and courier
+    EXACT LOGIC FROM REFERENCE APP - INCLUDING ROUNDING RULES
+    """
+    if courier not in B2C_RATE_CARD:
+        return None, "Courier not in rate card"
+    
+    if zone not in B2C_RATE_CARD[courier]:
+        return None, f"Zone {zone} not found for {courier}"
     
     rates = B2C_RATE_CARD[courier][zone]
     
+    # Convert weight to grams for easier calculation
+    weight_grams = weight_kg * 1000
+    
+    # For Air couriers (simpler rate structure) - EXACT LOGIC
+    if 'Air' in courier:
+        if weight_grams <= 500:
+            return rates['0-500'], "Base rate (0-500g)"
+        else:
+            # Calculate additional 500g slabs - EXACT ROUNDING LOGIC
+            additional_slabs = ((weight_grams - 500) / 500)
+            if additional_slabs != int(additional_slabs):
+                additional_slabs = int(additional_slabs) + 1
+            else:
+                additional_slabs = int(additional_slabs)
+            
+            cost = rates['0-500'] + (additional_slabs * rates['add_500'])
+            return cost, f"Base + {additional_slabs} x 500g"
+    
+    # For Surface couriers (more complex structure) - EXACT LOGIC
     if weight_kg <= 0.5:
-        return rates['0-500'], "Base (0-500g)"
+        return rates['0-500'], "Base rate (0-500g)"
     elif weight_kg <= 2.0:
-        slabs = int((weight_kg * 1000 - 500) / 500) + (1 if (weight_kg * 1000 - 500) % 500 > 0 else 0)
-        return rates['0-500'] + slabs * rates['add_500'], f"0-2kg: Base + {slabs}×500g"
+        # Between 0.5kg and 2kg - EXACT ROUNDING
+        additional_slabs = ((weight_grams - 500) / 500)
+        if additional_slabs != int(additional_slabs):
+            additional_slabs = int(additional_slabs) + 1
+        else:
+            additional_slabs = int(additional_slabs)
+        cost = rates['0-500'] + (additional_slabs * rates['add_500'])
+        return cost, f"0-2kg: Base + {additional_slabs} x 500g"
     elif weight_kg <= 5.0:
-        kg = int(weight_kg - 2) + (1 if (weight_kg - 2) % 1 > 0 else 0)
-        return rates['2kg'] + kg * rates['add_1kg_2-5'], f"2-5kg: 2kg + {kg}×1kg"
+        # Between 2kg and 5kg - EXACT ROUNDING
+        additional_kg = weight_kg - 2.0
+        if additional_kg != int(additional_kg):
+            additional_kg = int(additional_kg) + 1
+        else:
+            additional_kg = int(additional_kg)
+        cost = rates['2kg'] + (additional_kg * rates['add_1kg_2-5'])
+        return cost, f"2-5kg: 2kg base + {additional_kg} x 1kg"
     elif weight_kg <= 10.0:
-        kg = int(weight_kg - 5) + (1 if (weight_kg - 5) % 1 > 0 else 0)
-        return rates['5kg'] + kg * rates['add_1kg_5-10'], f"5-10kg: 5kg + {kg}×1kg"
+        # Between 5kg and 10kg - EXACT ROUNDING
+        additional_kg = weight_kg - 5.0
+        if additional_kg != int(additional_kg):
+            additional_kg = int(additional_kg) + 1
+        else:
+            additional_kg = int(additional_kg)
+        cost = rates['5kg'] + (additional_kg * rates['add_1kg_5-10'])
+        return cost, f"5-10kg: 5kg base + {additional_kg} x 1kg"
     else:
-        kg = int(weight_kg - 10) + (1 if (weight_kg - 10) % 1 > 0 else 0)
-        return rates['10kg'] + kg * rates['add_1kg_10+'], f"10kg+: 10kg + {kg}×1kg"
+        # Above 10kg - EXACT ROUNDING
+        additional_kg = weight_kg - 10.0
+        if additional_kg != int(additional_kg):
+            additional_kg = int(additional_kg) + 1
+        else:
+            additional_kg = int(additional_kg)
+        cost = rates['10kg'] + (additional_kg * rates['add_1kg_10+'])
+        return cost, f"10+kg: 10kg base + {additional_kg} x 1kg"
 
 def calculate_b2b_cost(weight_kg, dest_zone, invoice_value=0):
-    """Calculate B2B shipping cost"""
+    """Calculate B2B shipping cost (Safexpress logic)"""
     zone_key = f"{ORIGIN_B2B_ZONE} to {dest_zone}"
     base_rate = B2B_BASE_RATES.get(zone_key, 8.64)
     
@@ -182,6 +355,7 @@ def calculate_b2b_cost(weight_kg, dest_zone, invoice_value=0):
 def calculate_invoice_shipping_costs(invoices, item_master, customers):
     """
     Calculate shipping costs for all invoices
+    EXACT LOGIC - matches reference app
     
     Returns: Dict mapping invoice_id to shipping calculation details
     """
@@ -221,6 +395,10 @@ def calculate_invoice_shipping_costs(invoices, item_master, customers):
         dest_state = invoice_items[0].get('dest_state', '')
         total_invoice_value = sum(item.get('item_total', 0) for item in invoice_items)
         
+        # Determine origin
+        origin_city = DEFAULT_ORIGIN_CITY
+        origin_state = DEFAULT_ORIGIN_STATE
+        
         # Calculate shipping for each line item
         line_calculations = []
         total_shipping = 0
@@ -234,14 +412,22 @@ def calculate_invoice_shipping_costs(invoices, item_master, customers):
             dead_weight = product.get('dead_weight_kg', 0.5)
             vol_weight = product.get('volumetric_weight_kg', 0.5)
             
-            # Chargeable weight = Max(dead, volumetric)
+            # Chargeable weight = Max(dead, volumetric) - EXACT LOGIC
             chargeable_per_unit = max(dead_weight, vol_weight)
             total_weight = chargeable_per_unit * quantity
             
             # Calculate cost
             if customer_type == 'B2C':
-                zone = determine_b2c_zone(dest_city, dest_state)
-                cost, breakdown = calculate_b2c_cost(total_weight, zone)
+                # Use B2C logic with zone determination
+                zone = determine_zone(origin_city, dest_city, dest_state, origin_state)
+                courier = customer.get('preferred_courier', DEFAULT_B2C_COURIER)
+                if courier not in B2C_RATE_CARD:
+                    courier = DEFAULT_B2C_COURIER
+                
+                cost, breakdown = calculate_freight_cost(total_weight, zone, courier)
+                if cost is None:
+                    cost = 0
+                    breakdown = "Rate not found"
             else:  # B2B
                 dest_zone = determine_b2b_zone(dest_state)
                 cost, breakdown = calculate_b2b_cost(total_weight, dest_zone, total_invoice_value)
