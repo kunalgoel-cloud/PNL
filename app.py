@@ -309,89 +309,220 @@ page = st.sidebar.radio(
 # ============================================================================
 # PAGE: ITEM MASTER (FIXED - Now fully editable)
 # ============================================================================
+# ============================================================================
+# PAGE: ITEM MASTER (REDESIGNED - B2C & B2B SUPPORT)
+# ============================================================================
 if page == "Item Master":
     st.title("📦 Item Master Management")
     
+    st.markdown("""
+    <div class="info-box">
+    <strong>Manage products with COGS and shipping configuration</strong><br>
+    • <strong>B2C Items</strong>: Unit-based (dead weight, volumetric weight per unit)<br>
+    • <strong>B2B Items</strong>: Case-based (units per case, weight per case)
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Toggle between B2C and B2B entry
     st.markdown("### Add New Product")
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    config_mode = st.radio("Product Type", ["B2C (Unit Weight)", "B2B (Case Pack)"], horizontal=True)
     
-    with col1:
-        new_sku = st.text_input("SKU", key="new_sku")
-    with col2:
-        new_name = st.text_input("Product Name", key="new_name")
-    with col3:
-        new_category = st.text_input("Category", key="new_category")
-    with col4:
-        new_cogs = st.number_input("COGS (₹)", min_value=0.0, step=0.01, key="new_cogs")
-    with col5:
-        new_dead_weight = st.number_input("Dead Weight (kg)", min_value=0.0, step=0.01, value=0.5, key="new_dead")
-    with col6:
-        new_vol_weight = st.number_input("Vol Weight (kg)", min_value=0.0, step=0.01, value=0.5, key="new_vol")
+    if config_mode == "B2C (Unit Weight)":
+        st.markdown("#### Add B2C Item (Sold by Units)")
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        
+        with col1:
+            new_sku = st.text_input("SKU", key="new_sku_b2c")
+        with col2:
+            new_name = st.text_input("Product Name", key="new_name_b2c")
+        with col3:
+            new_category = st.text_input("Category", key="new_category_b2c")
+        with col4:
+            new_cogs = st.number_input("COGS (₹)", min_value=0.0, step=0.01, key="new_cogs_b2c")
+        with col5:
+            new_dead_weight = st.number_input("Dead Weight (kg/unit)", min_value=0.0, step=0.001, value=0.5, format="%.3f", key="new_dead_b2c")
+        with col6:
+            new_vol_weight = st.number_input("Vol Weight (kg/unit)", min_value=0.0, step=0.001, value=0.5, format="%.3f", key="new_vol_b2c")
+        
+        if st.button("➕ Add B2C Product"):
+            if new_sku and new_name:
+                st.session_state.item_master[new_sku] = {
+                    'sku': new_sku,
+                    'name': new_name,
+                    'category': new_category,
+                    'cogs': new_cogs,
+                    'item_type': 'B2C',
+                    'dead_weight': new_dead_weight,
+                    'volumetric_weight': new_vol_weight
+                }
+                save_all_data()
+                st.success(f"✅ B2C Product '{new_name}' added!")
+                st.rerun()
+            else:
+                st.error("⚠️ SKU and Product Name required!")
     
-    if st.button("➕ Add Product"):
-        if new_sku and new_name:
-            st.session_state.item_master[new_sku] = {
-                'sku': new_sku,
-                'name': new_name,
-                'category': new_category,
-                'cogs': new_cogs,
-                'dead_weight_kg': new_dead_weight,
-                'volumetric_weight_kg': new_vol_weight
-            }
-            save_all_data()
-            st.success(f"✅ Product '{new_name}' added!")
-            st.rerun()
-        else:
-            st.error("⚠️ SKU and Product Name required!")
+    else:  # B2B Case Pack
+        st.markdown("#### Add B2B Item (Sold by Cases)")
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        
+        with col1:
+            new_sku = st.text_input("SKU", key="new_sku_b2b")
+        with col2:
+            new_name = st.text_input("Product Name", key="new_name_b2b")
+        with col3:
+            new_category = st.text_input("Category", key="new_category_b2b")
+        with col4:
+            new_cogs = st.number_input("COGS (₹)", min_value=0.0, step=0.01, key="new_cogs_b2b")
+        with col5:
+            new_case_qty = st.number_input("Units per Case", min_value=1, step=1, value=75, key="new_case_qty")
+        with col6:
+            new_case_weight = st.number_input("Weight per Case (kg)", min_value=0.0, step=0.1, value=15.0, format="%.2f", key="new_case_weight")
+        
+        st.info(f"📦 Each case contains {new_case_qty} units and weighs {new_case_weight} kg")
+        
+        if st.button("➕ Add B2B Product"):
+            if new_sku and new_name:
+                st.session_state.item_master[new_sku] = {
+                    'sku': new_sku,
+                    'name': new_name,
+                    'category': new_category,
+                    'cogs': new_cogs,
+                    'item_type': 'B2B',
+                    'case_pack_qty': new_case_qty,
+                    'case_weight': new_case_weight
+                }
+                save_all_data()
+                st.success(f"✅ B2B Product '{new_name}' added!")
+                st.rerun()
+            else:
+                st.error("⚠️ SKU and Product Name required!")
     
     st.markdown("---")
-    st.markdown("### Current Products (Fully Editable)")
+    st.markdown("### Current Products")
+    
+    # Filter by type
+    filter_type = st.selectbox("Filter by Type", ["All", "B2C Only", "B2B Only"])
     
     if st.session_state.item_master:
-        # Convert to DataFrame for editing
         items_list = list(st.session_state.item_master.values())
         df = pd.DataFrame(items_list)
         
-        # Editable data editor
-        edited_df = st.data_editor(
-            df,
-            hide_index=True,
-            use_container_width=True,
-            num_rows="dynamic",  # Allow adding/deleting rows
-            column_config={
-                "sku": st.column_config.TextColumn("SKU", required=True),
-                "name": st.column_config.TextColumn("Product Name", required=True),
-                "category": st.column_config.TextColumn("Category"),
-                "cogs": st.column_config.NumberColumn("COGS (₹)", format="₹%.2f", min_value=0.0),
-                "dead_weight_kg": st.column_config.NumberColumn("Dead Weight (kg)", format="%.3f", min_value=0.0),
-                "volumetric_weight_kg": st.column_config.NumberColumn("Volumetric Weight (kg)", format="%.3f", min_value=0.0)
-            },
-            key="item_master_editor"
-        )
+        # Ensure item_type exists (for backward compatibility)
+        if 'item_type' not in df.columns:
+            df['item_type'] = 'B2C'
         
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            if st.button("💾 Save All Changes", type="primary"):
-                # Update item master with edited values
-                new_master = {}
-                for _, row in edited_df.iterrows():
-                    if row['sku']:  # Only save if SKU exists
-                        new_master[row['sku']] = {
+        # Apply filter
+        if filter_type == "B2C Only":
+            df = df[df['item_type'] == 'B2C']
+        elif filter_type == "B2B Only":
+            df = df[df['item_type'] == 'B2B']
+        
+        # Display B2C items
+        b2c_items = df[df['item_type'] == 'B2C'].copy()
+        if len(b2c_items) > 0 and filter_type in ["All", "B2C Only"]:
+            st.markdown("#### B2C Items (Unit Weight)")
+            
+            # Ensure columns exist
+            for col in ['dead_weight', 'volumetric_weight']:
+                if col not in b2c_items.columns:
+                    b2c_items[col] = 0.5
+            
+            display_cols = ['sku', 'name', 'category', 'cogs', 'dead_weight', 'volumetric_weight']
+            edited_b2c = st.data_editor(
+                b2c_items[display_cols],
+                hide_index=True,
+                use_container_width=True,
+                num_rows="dynamic",
+                column_config={
+                    "sku": st.column_config.TextColumn("SKU", required=True),
+                    "name": st.column_config.TextColumn("Product Name", required=True),
+                    "category": st.column_config.TextColumn("Category"),
+                    "cogs": st.column_config.NumberColumn("COGS (₹)", format="₹%.2f", min_value=0.0),
+                    "dead_weight": st.column_config.NumberColumn("Dead Weight (kg)", format="%.3f", min_value=0.0),
+                    "volumetric_weight": st.column_config.NumberColumn("Vol Weight (kg)", format="%.3f", min_value=0.0)
+                },
+                key="b2c_editor"
+            )
+            
+            if st.button("💾 Save B2C Changes", type="primary"):
+                for _, row in edited_b2c.iterrows():
+                    if row['sku']:
+                        st.session_state.item_master[row['sku']] = {
                             'sku': row['sku'],
                             'name': row['name'],
                             'category': row['category'],
-                            'cogs': float(row['cogs'])
+                            'cogs': float(row['cogs']),
+                            'item_type': 'B2C',
+                            'dead_weight': float(row['dead_weight']),
+                            'volumetric_weight': float(row['volumetric_weight'])
                         }
-                st.session_state.item_master = new_master
                 save_all_data()
-                st.success("✅ All changes saved!")
+                st.success("✅ B2C items saved!")
                 st.rerun()
+        
+        # Display B2B items
+        b2b_items = df[df['item_type'] == 'B2B'].copy()
+        if len(b2b_items) > 0 and filter_type in ["All", "B2B Only"]:
+            st.markdown("#### B2B Items (Case Pack)")
+            
+            # Ensure columns exist
+            for col in ['case_pack_qty', 'case_weight']:
+                if col not in b2b_items.columns:
+                    if col == 'case_pack_qty':
+                        b2b_items[col] = 75
+                    else:
+                        b2b_items[col] = 15.0
+            
+            display_cols = ['sku', 'name', 'category', 'cogs', 'case_pack_qty', 'case_weight']
+            edited_b2b = st.data_editor(
+                b2b_items[display_cols],
+                hide_index=True,
+                use_container_width=True,
+                num_rows="dynamic",
+                column_config={
+                    "sku": st.column_config.TextColumn("SKU", required=True),
+                    "name": st.column_config.TextColumn("Product Name", required=True),
+                    "category": st.column_config.TextColumn("Category"),
+                    "cogs": st.column_config.NumberColumn("COGS (₹)", format="₹%.2f", min_value=0.0),
+                    "case_pack_qty": st.column_config.NumberColumn("Units/Case", min_value=1, step=1),
+                    "case_weight": st.column_config.NumberColumn("Weight/Case (kg)", format="%.2f", min_value=0.0)
+                },
+                key="b2b_editor"
+            )
+            
+            if st.button("💾 Save B2B Changes", type="primary", key="save_b2b"):
+                for _, row in edited_b2b.iterrows():
+                    if row['sku']:
+                        st.session_state.item_master[row['sku']] = {
+                            'sku': row['sku'],
+                            'name': row['name'],
+                            'category': row['category'],
+                            'cogs': float(row['cogs']),
+                            'item_type': 'B2B',
+                            'case_pack_qty': int(row['case_pack_qty']),
+                            'case_weight': float(row['case_weight'])
+                        }
+                save_all_data()
+                st.success("✅ B2B items saved!")
+                st.rerun()
+        
+        # Summary metrics
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        b2c_count = len(df[df['item_type'] == 'B2C'])
+        b2b_count = len(df[df['item_type'] == 'B2B'])
+        
+        with col1:
+            st.metric("Total Products", len(df))
+        with col2:
+            st.metric("B2C Products", b2c_count)
+        with col3:
+            st.metric("B2B Products", b2b_count)
+    
     else:
         st.info("ℹ️ No products yet. Add your first product above!")
 
-# ============================================================================
-# PAGE: UPLOAD INVOICES
-# ============================================================================
+
 elif page == "Upload Invoices":
     st.title("📄 Upload Invoices")
     
@@ -485,8 +616,9 @@ elif page == "Upload Invoices":
                             'name': item_name,
                             'category': '',
                             'cogs': 0.0,
-                            'dead_weight_kg': 0.5,
-                            'volumetric_weight_kg': 0.5
+                            'item_type': 'B2C',
+                            'dead_weight': 0.5,
+                            'volumetric_weight': 0.5
                         }
                         new_items.add(item_name)
                 
