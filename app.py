@@ -102,6 +102,7 @@ GRN_FILE = os.path.join(DATA_DIR, "grn.json")
 BANK_STATEMENTS_FILE = os.path.join(DATA_DIR, "bank_statements.json")
 TRANSACTION_MAPPING_FILE = os.path.join(DATA_DIR, "transaction_mapping.json")
 INVOICE_HASHES_FILE = os.path.join(DATA_DIR, "invoice_hashes.json")
+SHIPPING_CALCULATIONS_FILE = os.path.join(DATA_DIR, "shipping_calculations.json")
 
 # Helper functions
 def load_json(filepath, default=None):
@@ -277,6 +278,9 @@ def init_session_state():
     if 'invoice_hashes' not in st.session_state:
         hashes = load_json(INVOICE_HASHES_FILE, [])
         st.session_state.invoice_hashes = set(hashes) if isinstance(hashes, list) else set()
+    
+    if 'shipping_calculations' not in st.session_state:
+        st.session_state.shipping_calculations = load_json(SHIPPING_CALCULATIONS_FILE, {})
 
 init_session_state()
 
@@ -292,13 +296,14 @@ def save_all_data():
     save_json(BANK_STATEMENTS_FILE, st.session_state.bank_statements)
     save_json(TRANSACTION_MAPPING_FILE, st.session_state.transaction_mapping)
     save_json(INVOICE_HASHES_FILE, list(st.session_state.invoice_hashes))
+    save_json(SHIPPING_CALCULATIONS_FILE, st.session_state.shipping_calculations)
 
 # Sidebar navigation
 st.sidebar.title("📊 Navigation")
 page = st.sidebar.radio(
     "Go to",
     ["P&L Dashboard", "Item Master", "Upload Invoices", "Customers", 
-     "Logistics Rules", "GRN Management", "Receivables", "Bank Reconciliation", "Marketing Spends"]
+     "Logistics Rules", "Shipping Calculator", "GRN Management", "Receivables", "Bank Reconciliation", "Marketing Spends"]
 )
 
 # ============================================================================
@@ -308,7 +313,7 @@ if page == "Item Master":
     st.title("📦 Item Master Management")
     
     st.markdown("### Add New Product")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     with col1:
         new_sku = st.text_input("SKU", key="new_sku")
@@ -318,6 +323,10 @@ if page == "Item Master":
         new_category = st.text_input("Category", key="new_category")
     with col4:
         new_cogs = st.number_input("COGS (₹)", min_value=0.0, step=0.01, key="new_cogs")
+    with col5:
+        new_dead_weight = st.number_input("Dead Weight (kg)", min_value=0.0, step=0.01, value=0.5, key="new_dead")
+    with col6:
+        new_vol_weight = st.number_input("Vol Weight (kg)", min_value=0.0, step=0.01, value=0.5, key="new_vol")
     
     if st.button("➕ Add Product"):
         if new_sku and new_name:
@@ -325,7 +334,9 @@ if page == "Item Master":
                 'sku': new_sku,
                 'name': new_name,
                 'category': new_category,
-                'cogs': new_cogs
+                'cogs': new_cogs,
+                'dead_weight_kg': new_dead_weight,
+                'volumetric_weight_kg': new_vol_weight
             }
             save_all_data()
             st.success(f"✅ Product '{new_name}' added!")
@@ -351,7 +362,9 @@ if page == "Item Master":
                 "sku": st.column_config.TextColumn("SKU", required=True),
                 "name": st.column_config.TextColumn("Product Name", required=True),
                 "category": st.column_config.TextColumn("Category"),
-                "cogs": st.column_config.NumberColumn("COGS (₹)", format="₹%.2f", min_value=0.0)
+                "cogs": st.column_config.NumberColumn("COGS (₹)", format="₹%.2f", min_value=0.0),
+                "dead_weight_kg": st.column_config.NumberColumn("Dead Weight (kg)", format="%.3f", min_value=0.0),
+                "volumetric_weight_kg": st.column_config.NumberColumn("Volumetric Weight (kg)", format="%.3f", min_value=0.0)
             },
             key="item_master_editor"
         )
@@ -471,7 +484,9 @@ elif page == "Upload Invoices":
                             'sku': sku,
                             'name': item_name,
                             'category': '',
-                            'cogs': 0.0
+                            'cogs': 0.0,
+                            'dead_weight_kg': 0.5,
+                            'volumetric_weight_kg': 0.5
                         }
                         new_items.add(item_name)
                 
@@ -532,6 +547,7 @@ elif page == "Customers":
                 'type': data.get('type', 'B2C'),
                 'channel': data.get('channel', ''),
                 'credit_days': data.get('credit_days', 30),
+                'is_marketplace': data.get('is_marketplace', False),
                 'classification': data.get('classification', 'auto')
             })
         
@@ -549,6 +565,7 @@ elif page == "Customers":
                 "type": st.column_config.SelectboxColumn("Type", options=["B2B", "B2C"], required=True),
                 "channel": st.column_config.TextColumn("Channel"),
                 "credit_days": st.column_config.NumberColumn("Credit Days", min_value=0, max_value=365, step=1),
+                "is_marketplace": st.column_config.CheckboxColumn("Is Marketplace (Own Pickup)"),
                 "classification": st.column_config.TextColumn("Classification", disabled=True)
             },
             key="customers_editor"
@@ -563,6 +580,7 @@ elif page == "Customers":
                     'type': row['type'],
                     'channel': row['channel'],
                     'credit_days': int(row['credit_days']),
+                    'is_marketplace': bool(row['is_marketplace']),
                     'classification': 'manual'
                 }
             st.session_state.customers = new_customers
@@ -571,9 +589,10 @@ elif page == "Customers":
             st.rerun()
         
         st.markdown("---")
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         b2b_count = sum(1 for c in st.session_state.customers.values() if c.get('type') == 'B2B')
         b2c_count = sum(1 for c in st.session_state.customers.values() if c.get('type') == 'B2C')
+        marketplace_count = sum(1 for c in st.session_state.customers.values() if c.get('is_marketplace') == True)
         
         with col1:
             st.metric("Total Customers", len(st.session_state.customers))
@@ -581,6 +600,8 @@ elif page == "Customers":
             st.metric("B2B Customers", b2b_count)
         with col3:
             st.metric("B2C Customers", b2c_count)
+        with col4:
+            st.metric("Marketplaces (Own Pickup)", marketplace_count)
     else:
         st.info("ℹ️ No customers yet. Upload invoices to populate.")
 
@@ -713,6 +734,125 @@ elif page == "Logistics Rules":
 # ============================================================================
 # PAGE: GRN MANAGEMENT (FIXED - Tabular view with checkboxes)
 # ============================================================================
+# ============================================================================
+# PAGE: SHIPPING CALCULATOR
+# ============================================================================
+elif page == "Shipping Calculator":
+    st.title("🚚 Shipping Cost Calculator")
+    
+    st.markdown("""
+    <div class="info-box">
+    <strong>Calculate accurate shipping costs with volumetric weight</strong><br>
+    • Origin: Mumbai, Maharashtra (all shipments)<br>
+    • Chargeable Weight = Max(Dead Weight, Volumetric Weight)<br>
+    • Marketplaces with own pickup excluded (₹0 shipping)
+    </div>
+    """, unsafe_allow_html=True)
+    
+    try:
+        from shipping_calculator import calculate_invoice_shipping_costs
+        
+        if st.button("🔄 Calculate All Shipping Costs", type="primary"):
+            with st.spinner("Calculating shipping costs..."):
+                results = calculate_invoice_shipping_costs(
+                    st.session_state.invoices,
+                    st.session_state.item_master,
+                    st.session_state.customers
+                )
+                st.session_state.shipping_calculations = results
+                save_all_data()
+                st.success(f"✅ Calculated shipping for {len(results)} invoices")
+        
+        if st.session_state.shipping_calculations:
+            # Summary table
+            st.markdown("### Shipping Cost Summary")
+            summary_data = []
+            for inv_id, calc in st.session_state.shipping_calculations.items():
+                summary_data.append({
+                    'Invoice ID': inv_id,
+                    'Customer': calc['customer'],
+                    'Type': calc['customer_type'],
+                    'Is Marketplace': 'Yes' if calc.get('is_marketplace') else 'No',
+                    'Shipping Cost': calc['total_shipping_cost']
+                })
+            
+            df_summary = pd.DataFrame(summary_data)
+            st.dataframe(df_summary, use_container_width=True, column_config={
+                "Shipping Cost": st.column_config.NumberColumn("Shipping Cost", format="₹%.2f")
+            })
+            
+            # Detailed view
+            st.markdown("---")
+            st.markdown("### Detailed Breakdown")
+            selected_inv = st.selectbox("Select Invoice for Details", list(st.session_state.shipping_calculations.keys()))
+            
+            if selected_inv:
+                calc = st.session_state.shipping_calculations[selected_inv]
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Customer", calc['customer'])
+                    st.metric("Type", calc['customer_type'])
+                with col2:
+                    st.metric("Destination", f"{calc.get('dest_city', '')}, {calc.get('dest_state', '')}")
+                    marketplace_status = "Yes - Own Pickup" if calc.get('is_marketplace') else "No"
+                    st.metric("Is Marketplace", marketplace_status)
+                with col3:
+                    st.metric("Invoice Value", f"₹{calc.get('invoice_value', 0):,.2f}")
+                    st.metric("Total Shipping Cost", f"₹{calc['total_shipping_cost']:,.2f}")
+                
+                if calc.get('is_marketplace'):
+                    st.markdown("""
+                    <div class="info-box">
+                    🏪 <strong>Marketplace Customer:</strong> This customer has own pickup arrangement. No shipping charges applied.
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    # Line items breakdown
+                    st.markdown("#### Line Items Breakdown")
+                    if calc.get('line_items'):
+                        items_data = []
+                        for item in calc['line_items']:
+                            items_data.append({
+                                'SKU': item['sku'],
+                                'Item': item['item_name'],
+                                'Qty': item['quantity'],
+                                'Dead Wt (kg)': item['dead_weight'],
+                                'Vol Wt (kg)': item['vol_weight'],
+                                'Chargeable (kg)': item['chargeable_weight'],
+                                'Total Wt (kg)': item['total_weight'],
+                                'Zone': item['zone'],
+                                'Shipping Cost': item['cost']
+                            })
+                        
+                        df_items = pd.DataFrame(items_data)
+                        st.dataframe(df_items, use_container_width=True, column_config={
+                            "Shipping Cost": st.column_config.NumberColumn("Shipping (₹)", format="₹%.2f")
+                        })
+                        
+                        # B2B breakdown if applicable
+                        if calc['customer_type'] == 'B2B' and calc.get('line_items') and isinstance(calc['line_items'][0].get('breakdown'), dict):
+                            st.markdown("#### B2B Cost Components")
+                            bd = calc['line_items'][0]['breakdown']
+                            
+                            col_a, col_b, col_c, col_d, col_e = st.columns(5)
+                            with col_a:
+                                st.metric("Base Freight", f"₹{bd.get('base_freight', 0):.2f}")
+                            with col_b:
+                                st.metric("FSC (20%)", f"₹{bd.get('fsc', 0):.2f}")
+                            with col_c:
+                                st.metric("FOV (0.1%)", f"₹{bd.get('fov', 0):.2f}")
+                            with col_d:
+                                st.metric("Docket", f"₹{bd.get('docket', 0):.2f}")
+                            with col_e:
+                                st.metric("Total", f"₹{bd.get('total', 0):.2f}")
+        else:
+            st.info("Click 'Calculate All Shipping Costs' to generate shipping calculations")
+    
+    except ImportError:
+        st.error("❌ shipping_calculator.py not found")
+        st.info("Please place shipping_calculator.py in the same folder as this app")
+
 elif page == "GRN Management":
     st.title("📋 GRN Management")
     
